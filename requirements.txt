@@ -1,0 +1,8 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+twilio>=9.12,<10
+tzdata>=2025
+Pillow>=10,<13
+
+cryptography>=44,<49
+websockets>=15,<16

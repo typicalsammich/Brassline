@@ -1,0 +1,281 @@
+import json,math,os,re,secrets
+from datetime import datetime,timezone
+from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
+from urllib.parse import parse_qsl,urlsplit
+from fastapi import HTTPException,Request
+from fastapi.responses import Response
+from starlette.datastructures import FormData
+from pydantic import BaseModel,Field
+from scoring import settings,phone_key
+from leads_service import list_for
+
+def timestamp():return datetime.now(timezone.utc).isoformat()
+def as_date(value,tz):
+    d=datetime.fromisoformat(value.replace('Z','+00:00'))
+    return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).astimezone(tz).date()
+
+def twilio_config(uid=None):
+    names=['TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_API_KEY_SID','TWILIO_API_KEY_SECRET','TWILIO_TWIML_APP_SID','PUBLIC_BASE_URL']
+    from integration_store import effective_config
+    try:values=effective_config(uid)
+    except ValueError:values={};values['TWILIO_ENABLED']='0'
+    config={key:str(values.get(key) or '').strip() for key in names}
+    try:numbers=json.loads(values.get('TWILIO_NUMBERS_JSON') or '[]')
+    except ValueError:numbers=[]
+    if not isinstance(numbers,list):numbers=[]
+    config['numbers']=[n for n in numbers if isinstance(n,dict) and re.fullmatch(r'\+1\d{10}',str(n.get('number','')))]
+    base=urlsplit(config['PUBLIC_BASE_URL'])
+    config['enabled']=values.get('TWILIO_ENABLED')=='1' and all(config[key] for key in names) and base.scheme=='https' and bool(base.hostname) and not base.username and not base.password and bool(config['numbers'])
+    return config
+
+def number_pool(config,email):return [n for n in config['numbers'] if not n.get('users') or email.lower() in [str(u).lower() for u in n['users']]]
+
+def choose_number(pool,phone,counters,centres=None):
+    area=phone_key(phone)[:3];exact=[n for n in pool if phone_key(n['number'])[:3]==area]
+    eligible=exact or pool;reason='Matching area code' if exact else 'Area location unavailable; rotating available numbers'
+    if not exact and centres and area in centres:
+        target=centres[area];located=[n for n in pool if n.get('latitude') is not None and n.get('longitude') is not None]
+        if located:
+            def distance(n):
+                a,b,c,d=map(math.radians,[target['latitude'],target['longitude'],n['latitude'],n['longitude']]);return math.sin((c-a)/2)**2+math.cos(a)*math.cos(c)*math.sin((d-b)/2)**2
+            nearest=min(distance(n) for n in located);eligible=[n for n in located if abs(distance(n)-nearest)<1e-9];reason='Nearest configured area-code centre'
+    chosen=min(eligible,key=lambda n:(counters.get(n['number'],0),n['number']))
+    return chosen['number'],reason
+
+class Preferences(BaseModel):
+    daily_goal:int=Field(ge=1,le=2000)
+    timezone:str=Field(max_length=100)
+    auto_no_answer:bool=True
+class Begin(BaseModel):lead_id:int
+class Outcome(BaseModel):result:str=Field(max_length=100)
+
+def install(app,connect,user,practice):
+    with connect() as db:
+        db.executescript('''
+        CREATE TABLE IF NOT EXISTS dialer_preferences(user_id INTEGER PRIMARY KEY REFERENCES users(id),daily_goal INTEGER NOT NULL,timezone TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS dial_attempts(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),lead_id INTEGER NOT NULL REFERENCES leads(id),started_at TEXT NOT NULL,status TEXT NOT NULL,mode TEXT NOT NULL,dial_dispatched INTEGER NOT NULL DEFAULT 0,phone TEXT NOT NULL,caller_number TEXT,route_reason TEXT,twilio_sid TEXT,result_recorded INTEGER NOT NULL DEFAULT 0,script_id INTEGER);
+        CREATE TABLE IF NOT EXISTS number_rotation(user_id INTEGER REFERENCES users(id),number TEXT,uses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,number));
+        ''')
+        columns={r[1] for r in db.execute('PRAGMA table_info(call_events)')}
+        if 'attempt_id' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN attempt_id TEXT')
+        if 'recorded_at' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN recorded_at TEXT')
+        if 'recording_method' not in columns:db.execute("ALTER TABLE call_events ADD COLUMN recording_method TEXT NOT NULL DEFAULT 'manual'")
+        db.execute('CREATE INDEX IF NOT EXISTS event_attempt ON call_events(attempt_id)')
+        db.execute('DROP TRIGGER IF EXISTS preserve_call_results')
+        db.executescript('''CREATE TRIGGER preserve_call_results BEFORE UPDATE ON call_events WHEN NEW.user_id != OLD.user_id OR NEW.lead_id != OLD.lead_id OR NEW.result != OLD.result OR NEW.source != OLD.source OR NEW.created_at != OLD.created_at OR NEW.script_id IS NOT OLD.script_id OR NEW.caller_number IS NOT OLD.caller_number OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.recorded_at IS NOT OLD.recorded_at OR NEW.recording_method IS NOT OLD.recording_method BEGIN SELECT RAISE(ABORT,'Call history cannot be overwritten'); END;''')
+
+    with connect() as db:
+        columns={r[1] for r in db.execute('PRAGMA table_info(dialer_preferences)')}
+        if 'auto_no_answer' not in columns:db.execute('ALTER TABLE dialer_preferences ADD COLUMN auto_no_answer INTEGER NOT NULL DEFAULT 1')
+        columns={r[1] for r in db.execute('PRAGMA table_info(dial_attempts)')}
+        for name,definition in [('manual_stop','INTEGER NOT NULL DEFAULT 0'),('answered_seen','INTEGER NOT NULL DEFAULT 0'),('auto_result','INTEGER NOT NULL DEFAULT 0'),('child_sid','TEXT')]:
+            if name not in columns:db.execute(f'ALTER TABLE dial_attempts ADD COLUMN {name} {definition}')
+
+    def auto_no_answer(db,row):
+        pref=db.execute('SELECT auto_no_answer FROM dialer_preferences WHERE user_id=?',(row['user_id'],)).fetchone()
+        if not row['dial_dispatched'] or row['result_recorded'] or row['manual_stop'] or row['answered_seen'] or (pref and not pref['auto_no_answer']):return
+        if db.execute('SELECT 1 FROM call_events WHERE attempt_id=? AND ignored=0',(row['id'],)).fetchone():return
+        db.execute("INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at,recording_method) VALUES(?,?,'No Answer','dialer',?,?,?,?,?,'provider_no_answer')",(row['user_id'],row['lead_id'],row['started_at'],row['caller_number'],row['script_id'],row['id'],timestamp()))
+        db.execute("UPDATE dial_attempts SET status='ended',result_recorded=1,auto_result=1 WHERE id=?",(row['id'],))
+        db.execute("UPDATE followups SET state='completed' WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(row['user_id'],row['lead_id'],row['started_at']))
+        db.execute("INSERT INTO lead_sales(user_id,lead_id,stage) VALUES(?,?,'Contacted') ON CONFLICT(user_id,lead_id) DO UPDATE SET stage=CASE WHEN lead_sales.stage='New' THEN 'Contacted' ELSE lead_sales.stage END",(row['user_id'],row['lead_id']))
+
+    @app.get('/api/dialer/attempts/{attempt_id}/state')
+    def attempt_state(attempt_id:str,request:Request):
+        with connect() as db:
+            row=owned_attempt(db,user(request)['id'],attempt_id)
+            return {key:row[key] for key in ['id','status','result_recorded','auto_result','answered_seen','manual_stop']}
+
+    @app.post('/api/dialer/attempts/{attempt_id}/simulate-no-answer')
+    def simulate(attempt_id:str,request:Request):
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');row=owned_attempt(db,user(request)['id'],attempt_id)
+            if not practice or row['mode']!='practice':raise HTTPException(403,'Simulation is practice-only')
+            auto_no_answer(db,row)
+        return {'ok':True}
+
+    def prefs(uid):
+        config=settings()['dialer']
+        with connect() as db:
+            row=db.execute('SELECT * FROM dialer_preferences WHERE user_id=?',(uid,)).fetchone()
+        return dict(row) if row else {'daily_goal':config['default_goal'],'timezone':config['default_timezone'],'auto_no_answer':True}
+
+    def view(uid,email):
+        preferences=prefs(uid);tz=ZoneInfo(preferences['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date();rules=settings()['dialer']
+        with connect() as db:
+            events=[dict(row) for row in db.execute("SELECT * FROM call_events WHERE user_id=? AND source='dialer' AND ignored=0 ORDER BY id",(uid,))]
+            pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
+        today_events=[e for e in events if as_date(e['created_at'],tz)==today]
+        outcomes={item['label']:item for item in rules['results']};answered=sum(bool(outcomes.get(e['result'],{}).get('answered')) for e in today_events);booked=sum(bool(outcomes.get(e['result'],{}).get('booked')) for e in today_events)
+        from shared_services import calling_config
+        config=calling_config(uid);mode='practice' if practice else 'twilio' if config['enabled'] and number_pool(config,email) else 'list'
+        queue=[];histories={}
+        for event in events:histories.setdefault(event['lead_id'],[]).append(event)
+        for lead in list_for(connect,uid):
+            history=histories.get(lead['id'],[]);called_today=any(as_date(e['created_at'],tz)==today for e in history)
+            retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
+            due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
+            eligible=not blocked and lead['state']=='ready' and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
+            if eligible or called_today:
+                lead.update(eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(history),second_try=retry,latest_attempt_id=history[-1]['attempt_id'] if history else None)
+                queue.append(lead)
+        active=None
+        if pending:
+            active={key:pending[key] for key in ['id','lead_id','status','mode','started_at','caller_number','route_reason','script_id','call_limit_seconds','sponsored']}
+        if active:
+            active['script_snapshot']=json.loads(pending['script_snapshot'])
+            active['funding']='Administrator-funded' if pending['sponsored'] else 'Your Twilio account'
+        return {'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
+
+    def owned_attempt(db,uid,attempt_id):
+        row=db.execute('SELECT * FROM dial_attempts WHERE id=? AND user_id=?',(attempt_id,uid)).fetchone()
+        if not row:raise HTTPException(404,'Call attempt not found')
+        return row
+
+    def hangup(row):
+        if row['mode']=='twilio' and row['twilio_sid'] and row['status'] not in ('ended','failed'):
+            from twilio.rest import Client
+            from shared_services import attempt_config
+            cfg=attempt_config(row)
+            try:Client(cfg['TWILIO_ACCOUNT_SID'],cfg['TWILIO_AUTH_TOKEN']).calls(row['twilio_sid']).update(status='completed')
+            except Exception:raise HTTPException(502,'Could not confirm hang-up with Twilio. Auto-dial is paused; retry hang-up before continuing.')
+
+    @app.get('/api/dialer')
+    def dashboard(request:Request):u=user(request);return view(u['id'],u['email'])
+
+    @app.post('/api/dialer/preferences')
+    def save_preferences(data:Preferences,request:Request):
+        try:ZoneInfo(data.timezone)
+        except (ZoneInfoNotFoundError,ValueError):raise HTTPException(400,'Choose a valid time zone')
+        with connect() as db:db.execute('INSERT OR REPLACE INTO dialer_preferences(user_id,daily_goal,timezone,auto_no_answer) VALUES(?,?,?,?)',(user(request)['id'],data.daily_goal,data.timezone,int(data.auto_no_answer)))
+        return {'ok':True}
+
+    @app.post('/api/dialer/attempts')
+    def begin(data:Begin,request:Request):
+        u=user(request);snapshot=view(u['id'],u['email'])
+        if snapshot['mode']=='list':raise HTTPException(503,'Twilio is not configured. Practice mode works without an account.')
+        lead=next((l for l in snapshot['queue'] if l['id']==data.lead_id and l['eligible']),None)
+        if not lead:raise HTTPException(409,'This lead is not ready for a call today. Refresh the calling list.')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT id FROM dial_attempts WHERE user_id=? AND result_recorded=0',(u['id'],)).fetchone():raise HTTPException(409,'Finish the current call result before starting another')
+            from leads_service import row_dict
+            fresh=db.execute('SELECT * FROM leads WHERE id=? AND user_id=?',(lead['id'],u['id'])).fetchone()
+            current=row_dict(fresh) if fresh else None
+            history=db.execute("SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND source='dialer' AND ignored=0 ORDER BY id",(u['id'],lead['id'])).fetchall()
+            tz=ZoneInfo(snapshot['preferences']['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date()
+            last=db.execute('SELECT result FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(u['id'],lead['id'])).fetchone()
+            retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
+            from crm_service import blocked as contact_blocked
+            sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
+            due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
+            excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
+            if not current or current['state']!='ready' or excluded or contact_blocked(db,u['id'],fresh) or (not due and ((history and not retry) or (last and last['result'] in ('Booked','Not Interested','Wrong Number')))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            lead['phone']=current['phone']
+            if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
+            else:
+                from shared_services import calling_config
+                cfg=calling_config(u['id']);pool=number_pool(cfg,u['email']);counters={r['number']:r['uses'] for r in db.execute('SELECT * FROM number_rotation WHERE user_id=?',(u['id'],))}
+                centres=settings()['dialer'].get('area_code_centres',{})
+                number,reason=choose_number(pool,lead['phone'],counters,centres)
+                db.execute('INSERT INTO number_rotation VALUES(?,?,1) ON CONFLICT(user_id,number) DO UPDATE SET uses=uses+1',(u['id'],number))
+            script=db.execute("SELECT s.* FROM scripts s JOIN script_preferences p ON p.active_script=s.id WHERE p.user_id=? AND s.user_id=? AND s.kind='call' AND s.archived=0 AND s.deleted=0",(u['id'],u['id'])).fetchone()
+            script_snapshot=dict(script) if script else {}
+            attempt=secrets.token_urlsafe(24)
+            from shared_services import calling_reservation
+            call_limit=calling_reservation(db,u['id'],attempt,cfg) if snapshot['mode']!='practice' else 0
+            db.execute('INSERT INTO dial_attempts(id,user_id,lead_id,started_at,status,mode,dial_dispatched,phone,caller_number,route_reason,script_id,script_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(attempt,u['id'],lead['id'],timestamp(),'ringing' if practice else 'preparing',snapshot['mode'],int(practice),'+1'+phone_key(lead['phone']),number,reason,script['id'] if script else None,json.dumps(script_snapshot)))
+            if snapshot['mode']!='practice':db.execute('UPDATE dial_attempts SET provider_owner=?,sponsored=?,call_limit_seconds=? WHERE id=?',(cfg['provider_owner'],int(cfg['sponsored']),call_limit,attempt))
+        return {'id':attempt,'funding':snapshot['funding'],'call_limit_seconds':call_limit,'lead_id':lead['id'],'mode':snapshot['mode'],'caller_number':number,'route_reason':reason,'script_id':script['id'] if script else None,'script_snapshot':script_snapshot}
+
+    @app.post('/api/dialer/attempts/{attempt_id}/hangup')
+    def end_call(attempt_id:str,request:Request):
+        uid=user(request)['id']
+        with connect() as db:
+            row=owned_attempt(db,uid,attempt_id);db.execute('UPDATE dial_attempts SET manual_stop=1 WHERE id=?',(attempt_id,))
+        hangup(row)
+        with connect() as db:db.execute("UPDATE dial_attempts SET status='ended' WHERE id=?",(attempt_id,))
+        return {'ok':True,'note':'Choose a result to finish this lead. No result was recorded automatically.'}
+
+    @app.post('/api/dialer/attempts/{attempt_id}/result')
+    def record(attempt_id:str,data:Outcome,request:Request):
+        uid=user(request)['id'];labels={r['label'] for r in settings()['dialer']['results']}
+        if data.result not in labels:raise HTTPException(400,'Unknown call result')
+        with connect() as db:row=owned_attempt(db,uid,attempt_id)
+        hangup(row)
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');row=owned_attempt(db,uid,attempt_id)
+            previous=db.execute('SELECT id,result FROM call_events WHERE attempt_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(attempt_id,)).fetchone()
+            if previous:
+                if previous['result']==data.result:return {'ok':True,'event_id':previous['id'],'already_saved':True}
+                raise HTTPException(409,'Mark the previous result ignored before recording a correction')
+            source='dialer' if row['dial_dispatched'] else 'leads'
+            event=db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',(uid,row['lead_id'],data.result,source,row['started_at'],row['caller_number'],row['script_id'],attempt_id,timestamp())).lastrowid
+            db.execute("UPDATE dial_attempts SET status='ended',result_recorded=1 WHERE id=?",(attempt_id,))
+            db.execute("UPDATE followups SET state='completed' WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(uid,row['lead_id'],row['started_at']))
+            db.execute("INSERT INTO lead_sales(user_id,lead_id,stage) VALUES(?,?,?) ON CONFLICT(user_id,lead_id) DO UPDATE SET stage=CASE WHEN lead_sales.stage IN ('New','Contacted') THEN excluded.stage ELSE lead_sales.stage END",(uid,row['lead_id'],'Meeting booked' if data.result=='Booked' else 'Contacted'))
+        return {'ok':True,'event_id':event,'source':source}
+
+    @app.post('/api/dialer/token')
+    def token(request:Request):
+        u=user(request)
+        from shared_services import calling_config
+        cfg=calling_config(u['id'])
+        if practice or not cfg['enabled'] or not number_pool(cfg,u['email']):raise HTTPException(503,'Real calling is not enabled')
+        from twilio.jwt.access_token import AccessToken
+        from twilio.jwt.access_token.grants import VoiceGrant
+        lifetime=settings()['dialer']['token_ttl_seconds']
+        grant=VoiceGrant(outgoing_application_sid=cfg['TWILIO_TWIML_APP_SID'],incoming_allow=False)
+        token=AccessToken(cfg['TWILIO_ACCOUNT_SID'],cfg['TWILIO_API_KEY_SID'],cfg['TWILIO_API_KEY_SECRET'],identity=f"user_{u['id']}",ttl=lifetime);token.add_grant(grant)
+        return {'token':token.to_jwt(),'expires_in':lifetime}
+
+    async def verified_form(request):
+        body=await request.body()
+        if len(body)>32000:raise HTTPException(413,'Webhook too large')
+        if not request.headers.get('content-type','').startswith('application/x-www-form-urlencoded'):raise HTTPException(415,'Twilio form request required')
+        try:form=FormData(parse_qsl(body.decode(),keep_blank_values=True))
+        except UnicodeError:raise HTTPException(400,'Invalid form')
+        attempt=request.query_params.get('attempt') or form.get('AttemptId','')
+        with connect() as db:row=db.execute('SELECT * FROM dial_attempts WHERE id=?',(attempt,)).fetchone()
+        if not row:raise HTTPException(403,'Call is not authorized')
+        from shared_services import attempt_config
+        cfg=attempt_config(row)
+        if practice or not cfg['enabled']:raise HTTPException(503,'Real calling is not enabled')
+        from twilio.request_validator import RequestValidator
+        url=cfg['PUBLIC_BASE_URL'].rstrip('/')+request.url.path+('?' + request.url.query if request.url.query else '')
+        if not RequestValidator(cfg['TWILIO_AUTH_TOKEN']).validate(url,form,request.headers.get('x-twilio-signature','')):raise HTTPException(403,'Invalid Twilio signature')
+        if form.get('AccountSid')!=cfg['TWILIO_ACCOUNT_SID']:raise HTTPException(403,'Twilio account does not match')
+        return cfg,form
+
+    @app.post('/api/twilio/voice')
+    async def voice(request:Request):
+        cfg,form=await verified_form(request)
+        attempt=form.get('AttemptId','');identity=form.get('From','');lead=form.get('LeadId','')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM dial_attempts WHERE id=?',(attempt,)).fetchone()
+            if not row or identity!=f"client:user_{row['user_id']}" or lead!=str(row['lead_id']) or row['result_recorded'] or row['status'] not in ('preparing','ringing'):raise HTTPException(403,'Call is not authorized')
+            if row['twilio_sid'] and row['twilio_sid']!=form.get('CallSid'):raise HTTPException(403,'Call attempt is already bound')
+            db.execute("UPDATE dial_attempts SET twilio_sid=?,dial_dispatched=1,status='ringing' WHERE id=?",(form.get('CallSid'),attempt))
+        from twilio.twiml.voice_response import VoiceResponse
+        response=VoiceResponse();dial=response.dial(caller_id=row['caller_number'],answer_on_bridge=True,timeout=25,**({'time_limit':row['call_limit_seconds']} if row['call_limit_seconds'] else {}))
+        dial.number(row['phone'],status_callback=cfg['PUBLIC_BASE_URL'].rstrip('/')+'/api/twilio/status?attempt='+attempt,status_callback_method='POST',status_callback_event='initiated ringing answered completed')
+        return Response(str(response),media_type='application/xml')
+
+    @app.post('/api/twilio/status')
+    async def status(request:Request):
+        cfg,form=await verified_form(request);attempt=request.query_params.get('attempt','')
+        mapping={'initiated':'ringing','ringing':'ringing','in-progress':'connected','completed':'ended','busy':'ended','no-answer':'ended','failed':'failed','canceled':'ended'}
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM dial_attempts WHERE id=?',(attempt,)).fetchone()
+            if not row or not row['twilio_sid'] or not form.get('CallSid') or (form.get('ParentCallSid') or form.get('CallSid'))!=row['twilio_sid']:raise HTTPException(403,'Call callback does not match')
+            if row['child_sid'] and row['child_sid']!=form.get('CallSid'):raise HTTPException(403,'Call leg does not match')
+            db.execute('UPDATE dial_attempts SET child_sid=COALESCE(child_sid,?) WHERE id=?',(form.get('CallSid'),attempt))
+            if form.get('CallStatus')=='in-progress':db.execute('UPDATE dial_attempts SET answered_seen=1 WHERE id=?',(attempt,))
+            if form.get('CallStatus')=='no-answer':auto_no_answer(db,row)
+            state=mapping.get(form.get('CallStatus'))
+            if state and not row['result_recorded'] and row['status'] not in ('ended','failed'):db.execute('UPDATE dial_attempts SET status=? WHERE id=?',(state,attempt))
+        return Response(status_code=204)
+
+    app.state.verified_twilio_form=verified_form

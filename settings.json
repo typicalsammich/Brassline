@@ -1,0 +1,122 @@
+{
+  "weights": {
+    "website_need": 40,
+    "activity": 25,
+    "contactability": 15,
+    "decision_maker": 10,
+    "commercial_fit": 10
+  },
+  "ready_score": 60,
+  "website_need": {
+    "no_website": 1.0,
+    "broken": 0.95,
+    "usability": 0.85,
+    "content": 0.65,
+    "dated": 0.25,
+    "strong": 0.0
+  },
+  "activity_window_days": 180,
+  "activity_volume_target": 5,
+  "activity_recency_share": 0.8,
+  "contact_phone_share": 1.0,
+  "contact_email_share": 0.6,
+  "contact_social_share": 0.4,
+  "decision_identified_share": 0.5,
+  "decision_authority_share": 1.0,
+  "fit_independence_share": 0.6,
+  "fit_category_share": 0.4,
+  "category_allowlist": [
+    "plumber",
+    "towing",
+    "electrician",
+    "hvac",
+    "roofer",
+    "general contractor",
+    "remodeler",
+    "handyman",
+    "stucco",
+    "plastering",
+    "landscaper",
+    "cleaner"
+  ],
+  "category_aliases": {
+    "plumbing": "plumber",
+    "plumbing contractor": "plumber",
+    "towing service": "towing",
+    "electrical contractor": "electrician",
+    "hvac contractor": "hvac",
+    "heating contractor": "hvac",
+    "air conditioning contractor": "hvac",
+    "roofing contractor": "roofer",
+    "roofing": "roofer",
+    "contractor": "general contractor",
+    "remodeling": "remodeler",
+    "stucco contractor": "stucco",
+    "plastering contractor": "plastering",
+    "landscaping": "landscaper",
+    "landscaping company": "landscaper",
+    "cleaning service": "cleaner",
+    "house cleaning service": "cleaner"
+  },
+  "priority_markets": [
+    "menifee",
+    "jacksonville",
+    "colorado springs"
+  ],
+  "website_checks": {
+    "timeout_seconds": 6,
+    "max_pages": 3,
+    "max_redirects": 3,
+    "max_bytes": 1000000
+  },
+  "score_bands": {
+    "high": 80,
+    "qualified": 60,
+    "developing": 40,
+    "low": 0
+  },
+  "scraper": {
+    "tile_degrees": 0.04,
+    "map_zoom": 14,
+    "pause_seconds": 4,
+    "max_scrolls": 40,
+    "max_review_scrolls": 5,
+    "lease_seconds": 600,
+    "poll_seconds": 10,
+    "max_tiles_per_run": 60,
+    "max_leads_per_run": 300
+  },
+  "dialer": {
+    "default_goal": 50,
+    "default_timezone": "America/New_York",
+    "token_ttl_seconds": 900,
+    "second_try_limit": 2,
+    "results": [
+      {
+        "label": "No Answer",
+        "answered": false,
+        "booked": false
+      },
+      {
+        "label": "Not Interested",
+        "answered": true,
+        "booked": false
+      },
+      {
+        "label": "Booked",
+        "answered": true,
+        "booked": true
+      },
+      {
+        "label": "Call Later",
+        "answered": true,
+        "booked": false
+      },
+      {
+        "label": "Wrong Number",
+        "answered": false,
+        "booked": false
+      }
+    ]
+  }
+}
