@@ -115,7 +115,8 @@ def install(app,connect,user,practice):
     def view(uid,email,list_id=0):
         preferences=prefs(uid);tz=ZoneInfo(preferences['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date();rules=settings()['dialer']
         with connect() as db:
-            events=[dict(row) for row in db.execute("SELECT * FROM call_events WHERE user_id=? AND source='dialer' AND ignored=0 ORDER BY id",(uid,))]
+            dispositions=[dict(row) for row in db.execute("SELECT * FROM call_events WHERE user_id=? AND ignored=0 ORDER BY id",(uid,))]
+            events=[event for event in dispositions if event['source']=='dialer']
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
         with connect() as db:
             lists=[dict(r) for r in db.execute('SELECT l.id,l.name,COUNT(m.lead_id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id WHERE l.user_id=? GROUP BY l.id ORDER BY l.id',(uid,))]
@@ -126,15 +127,17 @@ def install(app,connect,user,practice):
         from shared_services import calling_config
         config=calling_config(uid);mode='practice' if practice else 'twilio' if config['enabled'] and number_pool(config,email) else 'list'
         queue=[];histories={}
-        for event in events:histories.setdefault(event['lead_id'],[]).append(event)
+        for event in dispositions:histories.setdefault(event['lead_id'],[]).append(event)
         for lead in list_for(connect,uid):
             if list_id and lead['id'] not in members:continue
             history=histories.get(lead['id'],[]);called_today=any(as_date(e['created_at'],tz)==today for e in history)
+            calls=[e for e in history if e['source']=='dialer']
+            no_answer_today=bool(history and history[-1]['result']=='No Answer' and as_date(history[-1]['created_at'],tz)==today)
             retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
             due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
-            eligible=not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
+            eligible=not no_answer_today and not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
             if eligible or called_today:
-                lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['last_result'] not in ('Not Interested','Wrong Number','Booked') and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(history),second_try=retry,latest_attempt_id=history[-1]['attempt_id'] if history else None)
+                lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['last_result'] not in ('Not Interested','Wrong Number','Booked') and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(calls),done_today=called_today and not eligible,second_try=retry,latest_attempt_id=calls[-1]['attempt_id'] if calls else None)
                 queue.append(lead)
         active=None
         if pending:
@@ -240,15 +243,16 @@ def install(app,connect,user,practice):
             from leads_service import row_dict
             fresh=db.execute('SELECT * FROM leads WHERE id=? AND user_id=?',(lead['id'],u['id'])).fetchone()
             current=row_dict(fresh) if fresh else None
-            history=db.execute("SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND source='dialer' AND ignored=0 ORDER BY id",(u['id'],lead['id'])).fetchall()
+            history=db.execute("SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id",(u['id'],lead['id'])).fetchall()
             tz=ZoneInfo(snapshot['preferences']['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date()
             last=db.execute('SELECT result FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(u['id'],lead['id'])).fetchone()
             retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
+            no_answer_today=bool(history and history[-1]['result']=='No Answer' and as_date(history[-1]['created_at'],tz)==today)
             from crm_service import blocked as contact_blocked
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
             due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id and not data.manual_repeat) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            if (no_answer_today and not data.manual_repeat and not retry_failure) or not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id and not data.manual_repeat) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:
@@ -375,4 +379,3 @@ def install(app,connect,user,practice):
     app.state.verified_twilio_form=verified_form
     from call_history_service import install as install_history
     install_history(app,connect,user,practice,verified_form)
-
