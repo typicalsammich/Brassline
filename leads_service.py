@@ -76,11 +76,26 @@ def row_dict(row):
     except ValueError:lead['website_check']={}
     lead.update(score(lead));return lead
 
+def owner_display(db,uid,lead):
+    confirmed=str(lead.get('facts',{}).get('owner_name') or '').strip()
+    if confirmed:return {'owner_name_display':confirmed,'owner_name_source':'Saved lead details'}
+    rows=db.execute('SELECT original FROM lead_import_records WHERE user_id=? AND lead_id=? ORDER BY id DESC',(uid,lead['id'])).fetchall()
+    for row in rows:
+        try:cells=json.loads(row['original']).get('cells',[])
+        except (ValueError,TypeError):continue
+        for cell in cells:
+            header=re.sub(r'[^a-z0-9]','',str(cell.get('header','')).lower())
+            value=str(cell.get('value') or '').strip()
+            if header in ('businessowner','businessownersname','businessownername','owner','ownername','contactname','decisionmaker','decisionmakername') and value:
+                return {'owner_name_display':value[:300],'owner_name_source':'Imported spreadsheet — unverified'}
+    return {'owner_name_display':'','owner_name_source':''}
+
 def list_for(connect, uid):
     with connect() as db:
         rows=db.execute('''SELECT leads.*, batches.name AS batch_name FROM leads LEFT JOIN batches ON batches.id=leads.batch_id WHERE leads.user_id=? AND leads.deleted_at IS NULL AND (NOT EXISTS (SELECT 1 FROM lead_batches WHERE lead_id=leads.id) OR EXISTS (SELECT 1 FROM lead_batches JOIN batches b ON b.id=lead_batches.batch_id WHERE lead_id=leads.id AND b.deleted_at IS NULL))''',(uid,)).fetchall()
         results=[row_dict(row) for row in rows]
         for lead in results:
+            lead.update(owner_display(db,uid,lead))
             job=db.execute('SELECT state FROM website_jobs WHERE lead_id=?',(lead['id'],)).fetchone()
             lead['website_check_state']=job['state'] if job else ('complete' if lead['website_check'] else 'not_checked')
             event=db.execute('SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(uid,lead['id'])).fetchone()
@@ -259,6 +274,7 @@ def install(app,connect,user,practice):
         uid=user(request)['id']
         with connect() as db:
             lead=row_dict(owned(db,uid,lead_id))
+            lead.update(owner_display(db,uid,lead))
             lead['imported_rows']=[{**dict(r),'original':json.loads(r['original'])} for r in db.execute('SELECT r.original,r.batch_id,f.filename FROM lead_import_records r JOIN lead_import_files f ON f.batch_id=r.batch_id WHERE r.user_id=? AND r.lead_id=? ORDER BY r.id',(uid,lead_id))]
             lead['events']=[dict(r) for r in db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id=? ORDER BY id DESC',(uid,lead_id))]
             return lead
