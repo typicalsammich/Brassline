@@ -11,6 +11,8 @@ import website_checks
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):return None
 def provider_json(url,payload=None,headers=None,timeout=35):
+    host=urlsplit(url).hostname
+    provider={'serpapi.com':'SerpAPI','api.firecrawl.dev':'Firecrawl','api.apify.com':'Apify','api.resend.com':'Resend'}.get(host,'External provider')
     request=urllib.request.Request(url,data=json.dumps(payload).encode() if payload is not None else None,headers={'Content-Type':'application/json','User-Agent':'Brassline/1.0',**(headers or {})})
     try:
         with urllib.request.build_opener(NoRedirect).open(request,timeout=timeout) as response:
@@ -18,26 +20,44 @@ def provider_json(url,payload=None,headers=None,timeout=35):
             if len(raw)>2000000:raise ValueError('Oversized provider response')
             return json.loads(raw)
     except urllib.error.HTTPError as error:
-        if urlsplit(url).hostname=='api.resend.com':
+        if host=='api.resend.com':
             messages={401:'Resend rejected the API key. Replace it with a valid key from your Resend account.',403:'Resend denied access (HTTP 403). Domain verification requires a Full access API key; check the key permissions in Resend.',429:'Resend rate limit reached. Wait a moment before verifying again.'}
             raise HTTPException(502,messages.get(error.code,f'Resend returned HTTP {error.code}. Check your Resend dashboard and try verification again.')) from None
-        raise HTTPException(502,'Research provider request failed. Check your provider dashboard; no automatic paid retry was made.') from None
+        advice={400:'The search request was rejected. Check the provider request log for parameter details.',401:'The saved key was rejected. Check or replace it in Shared services.',402:'The provider requires available credits or a suitable plan. Check billing.',403:'Access was denied. Check key permissions and account status.',404:'The requested provider resource was not found.',429:'A request-rate limit or usage quota was reached. Check remaining searches/credits and hourly limits in the provider dashboard.'}
+        detail=advice.get(error.code,'The provider is temporarily unavailable.' if error.code>=500 else 'Check the provider dashboard for details.')
+        raise HTTPException(502,f'{provider} returned HTTP {error.code}. {detail} Completed results are retained; no automatic paid retry was made.') from None
+    except (TimeoutError,urllib.error.URLError):
+        raise HTTPException(502,f'{provider} could not be reached or timed out. Check the provider dashboard and connection. Completed results are retained; no automatic paid retry was made.') from None
     except Exception:
-        if urlsplit(url).hostname=='api.resend.com':raise HTTPException(502,'Brassline could not reach Resend or read its response. Check your internet connection and retry domain verification.') from None
-        raise HTTPException(502,'Research provider request failed. Check your provider dashboard; no automatic paid retry was made.') from None
+        raise HTTPException(502,f'{provider} returned an unreadable or oversized response. Completed results are retained; no automatic paid retry was made.') from None
+
+def search_error(provider,result):
+    # Interpret known categories without exposing response bodies, queries, or credentials.
+    text=str(result.get('error') or '').lower()
+    if 'run out of searches' in text or 'quota' in text or 'credits' in text:
+        detail='Search quota or credits exhausted. Check your provider usage and plan.'
+    elif 'api key' in text or 'unauthorized' in text:
+        detail='The saved key was rejected. Check or replace it in Shared services.'
+    elif 'rate limit' in text or 'throughput' in text:
+        detail='Request-rate limit reached. Check your provider hourly limits.'
+    else:detail='The search was not completed. Check its status in the provider dashboard.'
+    return HTTPException(502,provider+': '+detail+' Completed results are retained; no automatic paid retry was made.')
+
 def search_web(cfg,query,limit=5,maps=False):
     if cfg.get('serpapi_key'):
         parameters={'api_key':cfg['serpapi_key'],'engine':'google_maps' if maps else 'google','q':query,'hl':'en','gl':'us'}
         if maps:parameters['type']='search'
         result=provider_json('https://serpapi.com/search.json?'+urlencode(parameters))
-        if result.get('error'):raise HTTPException(502,'Search provider returned an error; review its dashboard')
+        if result.get('error'):
+            if result.get('search_metadata',{}).get('status')=='Success' and "hasn't returned any results" in str(result['error']):return []
+            raise search_error('SerpAPI',result)
         if maps:
             return [{'name':r.get('title',''),'phone':r.get('phone',''),'place_id':r.get('place_id',''),'url':r.get('links',{}).get('place') or r.get('place_id_search') or 'https://www.google.com/maps/search/?api=1&query='+__import__('urllib.parse',fromlist=['quote']).quote(r.get('title','')),
                      'website':r.get('website',''),'snippet':r.get('address',''),'rating':r.get('rating'),'reviews':r.get('reviews'),'closed':bool(r.get('permanently_closed'))} for r in result.get('local_results',[])[:limit]]
         return [{'name':r.get('title',''),'url':r.get('link',''),'snippet':r.get('snippet','')} for r in result.get('organic_results',[])[:limit]]
     if cfg.get('firecrawl_key'):
         result=provider_json('https://api.firecrawl.dev/v2/search',{'query':query,'limit':limit,'country':'US','sources':['web']},{'Authorization':'Bearer '+cfg['firecrawl_key']})
-        if not result.get('success'):raise HTTPException(502,'Web discovery failed; review your Firecrawl dashboard')
+        if not result.get('success'):raise search_error('Firecrawl',result)
         data=result.get('data',{});rows=data.get('web',[]) if isinstance(data,dict) else data
         return [{'name':r.get('title',''),'url':r.get('url',''),'snippet':r.get('description',''),'website':''} for r in rows[:limit]]
     raise HTTPException(503,'The administrator has not connected a research provider')
@@ -76,7 +96,10 @@ def install(app,connect,user,practice):
         if cancelled(run):raise HTTPException(409,'Research cancelled')
         # Search units conservatively reserve result slots rather than treating calls as equal prices.
         shared.reserve(uid,'research',limit,'research:'+run+':'+key)
-        rows=search_web(cfg,query,limit,maps)
+        try:rows=search_web(cfg,query,limit,maps)
+        except HTTPException as error:
+            stage='listing discovery' if maps else 'website/social web search'
+            raise HTTPException(error.status_code,stage.capitalize()+': '+str(error.detail)) from None
         with connect() as db:db.execute('INSERT OR REPLACE INTO public_research_cache VALUES(?,?,?)',(key,json.dumps(rows),time.time()+86400))
         return rows
     def inspect_candidate(uid,run,cfg,seed,trade,place):
