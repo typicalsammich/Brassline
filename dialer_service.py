@@ -134,7 +134,7 @@ def install(app,connect,user,practice):
             due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
             eligible=not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
             if eligible or called_today:
-                lead.update(eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(history),second_try=retry,latest_attempt_id=history[-1]['attempt_id'] if history else None)
+                lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['last_result'] not in ('Not Interested','Wrong Number','Booked') and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(history),second_try=retry,latest_attempt_id=history[-1]['attempt_id'] if history else None)
                 queue.append(lead)
         active=None
         if pending:
@@ -247,7 +247,7 @@ def install(app,connect,user,practice):
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
             due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            if not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id and not data.manual_repeat) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:
@@ -264,6 +264,14 @@ def install(app,connect,user,practice):
             db.execute('INSERT INTO dial_attempts(id,user_id,lead_id,started_at,status,mode,dial_dispatched,phone,caller_number,route_reason,script_id,script_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(attempt,u['id'],lead['id'],timestamp(),'ringing' if practice else 'preparing',snapshot['mode'],int(practice),'+1'+phone_key(lead['phone']),number,reason,script['id'] if script else None,json.dumps(script_snapshot)))
             if snapshot['mode']!='practice':db.execute('UPDATE dial_attempts SET provider_owner=?,sponsored=?,call_limit_seconds=? WHERE id=?',(cfg['provider_owner'],int(cfg['sponsored']),call_limit,attempt))
         return {'id':attempt,'funding':snapshot['funding'],'call_limit_seconds':call_limit,'lead_id':lead['id'],'mode':snapshot['mode'],'caller_number':number,'route_reason':reason,'script_id':script['id'] if script else None,'script_snapshot':script_snapshot}
+
+    @app.post('/api/dialer/attempts/{attempt_id}/finish-without-result')
+    def finish_without_result(attempt_id:str,request:Request):
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');row=owned_attempt(db,user(request)['id'],attempt_id)
+            if row['status'] not in ('ended','failed'):raise HTTPException(409,'Hang up before finishing this call')
+            db.execute('UPDATE dial_attempts SET result_recorded=1 WHERE id=?',(attempt_id,))
+        return {'ok':True}
 
     @app.post('/api/dialer/attempts/{attempt_id}/hangup')
     def end_call(attempt_id:str,request:Request):

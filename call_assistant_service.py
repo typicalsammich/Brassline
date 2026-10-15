@@ -8,7 +8,7 @@ class Permission(BaseModel):consent:bool;acknowledge_streaming:bool=False
 class PracticeText(BaseModel):text:str=Field(min_length=1,max_length=4000);speaker:str='prospect'
 def transcription_ready():return os.getenv('TWILIO_TRANSCRIPTION_ENABLED')=='1'
 def suggestions(text,scripts,business):
-    text=text.casefold().replace('’',"'");intent='discovery';fallback='How do most new customers find '+business+' today, and what would you like your website to do better?'
+    text=text.casefold().replace('’',"'");intent='discovery';fallback='Listen to the prospect, acknowledge what they said, and ask one relevant question. Wait for their response before pitching.'
     patterns=[('stop',["do not call","don't call","stop calling","remove me","take me off"],'Respect the request. Say: “Understood. I will mark your business do not contact. Thank you.”'),('decline',['not interested','no thank you',"don't need",'do not need'],'Understood. Thank them for their time and end the conversation without pressure.'),('busy',['busy','bad time','not a good time','call back'],'No problem. Is there a better time, or would you prefer that I leave it here?'),('cost',['cost','price','expensive','budget','how much'],'The quote depends on the pages and features you need. Could I first understand what you want the website to accomplish?'),('website',['already have a website','have a site','already got a website'],'Is there anything about the current website you wish worked better? If it meets your needs, there may not be a reason to change it.'),('send',['send me','email me','text me'],'Of course. What would be most useful to send, and which business contact should I use?'),('interest',['interested','sounds good','meeting','appointment'],'Would a short conversation about the scope be useful? Agree on a time and confirm the preferred business contact.')]
     for name,words,response in patterns:
         if any(word in text for word in words):intent=name;fallback=response;break
@@ -144,3 +144,4 @@ def install(app,connect,user,practice,verified_form):
             purge(db)
         if event=='transcription-content' and track=='outbound_track':__import__('coaching_service').queue(attempt)
         return Response(status_code=204)
+
