@@ -50,6 +50,7 @@ class Begin(BaseModel):
     lead_id:int
     list_id:int=0
     retry_failed:bool=False
+    manual_repeat:bool=False
 class CallingList(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     lead_ids:list[int]=Field(default_factory=list,max_length=5000)
@@ -225,7 +226,7 @@ def install(app,connect,user,practice):
         u=user(request);snapshot=view(u['id'],u['email'],data.list_id)
         if snapshot['mode']=='list':raise HTTPException(503,'Twilio is not configured. Practice mode works without an account.')
         lead=next((l for l in snapshot['queue'] if l['id']==data.lead_id and l['eligible']),None)
-        if data.retry_failed:lead=next((l for l in list_for(connect,u['id']) if l['id']==data.lead_id),None)
+        if data.retry_failed or data.manual_repeat:lead=next((l for l in list_for(connect,u['id']) if l['id']==data.lead_id),None)
         if not lead:raise HTTPException(409,'This lead is not ready for a call today. Refresh the calling list.')
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -246,7 +247,7 @@ def install(app,connect,user,practice):
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
             due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if not current or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            if not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:

@@ -78,7 +78,7 @@ def row_dict(row):
 
 def list_for(connect, uid):
     with connect() as db:
-        rows=db.execute('''SELECT leads.*, batches.name AS batch_name FROM leads LEFT JOIN batches ON batches.id=leads.batch_id WHERE leads.user_id=? AND (NOT EXISTS (SELECT 1 FROM lead_batches WHERE lead_id=leads.id) OR EXISTS (SELECT 1 FROM lead_batches JOIN batches b ON b.id=lead_batches.batch_id WHERE lead_id=leads.id AND b.deleted_at IS NULL))''',(uid,)).fetchall()
+        rows=db.execute('''SELECT leads.*, batches.name AS batch_name FROM leads LEFT JOIN batches ON batches.id=leads.batch_id WHERE leads.user_id=? AND leads.deleted_at IS NULL AND (NOT EXISTS (SELECT 1 FROM lead_batches WHERE lead_id=leads.id) OR EXISTS (SELECT 1 FROM lead_batches JOIN batches b ON b.id=lead_batches.batch_id WHERE lead_id=leads.id AND b.deleted_at IS NULL))''',(uid,)).fetchall()
         results=[row_dict(row) for row in rows]
         for lead in results:
             job=db.execute('SELECT state FROM website_jobs WHERE lead_id=?',(lead['id'],)).fetchone()
@@ -99,6 +99,7 @@ def install(app,connect,user,practice):
         db.executescript('CREATE TABLE IF NOT EXISTS lead_import_files(batch_id INTEGER PRIMARY KEY REFERENCES batches(id),user_id INTEGER NOT NULL REFERENCES users(id),filename TEXT NOT NULL,content BLOB NOT NULL,kind TEXT NOT NULL);CREATE TABLE IF NOT EXISTS lead_import_records(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),lead_id INTEGER NOT NULL REFERENCES leads(id),batch_id INTEGER NOT NULL REFERENCES batches(id),record_hash TEXT NOT NULL,original TEXT NOT NULL,UNIQUE(user_id,lead_id,record_hash));')
     with connect() as db:
         columns={row[1] for row in db.execute('PRAGMA table_info(leads)')}
+        if 'deleted_at' not in columns:db.execute('ALTER TABLE leads ADD COLUMN deleted_at TEXT')
         for name in ['email','category','city','website_url','social_url','source_url','facts','website_check']:
             if name not in columns:db.execute(f"ALTER TABLE leads ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         db.execute('CREATE TABLE IF NOT EXISTS lead_batches(lead_id INTEGER REFERENCES leads(id),batch_id INTEGER REFERENCES batches(id),PRIMARY KEY(lead_id,batch_id))')
@@ -148,6 +149,23 @@ def install(app,connect,user,practice):
     def save_score(db,lead):
         computed=score(lead)
         db.execute('UPDATE leads SET score=?,grade=? WHERE id=?',(computed['score'],computed['grade'],lead['id']))
+
+    @app.post('/api/leads/{lead_id}/trash')
+    def trash_lead(lead_id:int,request:Request):
+        uid=user(request)['id']
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM leads WHERE id=? AND user_id=?',(lead_id,uid)).fetchone():raise HTTPException(404,'Lead not found')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND lead_id=? AND result_recorded=0',(uid,lead_id)).fetchone():raise HTTPException(409,'Finish the call result before removing this lead')
+            db.execute('UPDATE leads SET deleted_at=? WHERE id=?',(now(),lead_id))
+        return {'ok':True}
+
+    @app.post('/api/leads/{lead_id}/restore')
+    def restore_lead(lead_id:int,request:Request):
+        with connect() as db:
+            changed=db.execute('UPDATE leads SET deleted_at=NULL WHERE id=? AND user_id=?',(lead_id,user(request)['id'])).rowcount
+            if not changed:raise HTTPException(404,'Lead not found')
+        return {'ok':True}
 
     @app.get('/api/batches')
     def batches(request:Request):
@@ -278,3 +296,4 @@ def install(app,connect,user,practice):
             owned(db,uid,lead_id)
             db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at) VALUES(?,?,?,?,?)',(uid,lead_id,data.result,'leads',now()))
         return {'ok':True,'note':'Bookkeeping saved. This does not count as a dial.'}
+
