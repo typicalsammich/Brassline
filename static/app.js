@@ -3,7 +3,17 @@ const pages=['Leads','Scraper','Research','Dialer','Follow-ups','Pipeline','Anal
 const navIcons={'Leads':'◉','Scraper':'⌕','Research':'⌕','Dialer':'☎','Follow-ups':'◷','Pipeline':'▤','Analytics':'▥','Scripts':'≡','Settings':'⚙','Team invitations':'⊕','Shared services':'◎','Launch checks':'✓','Help':'?'};
 let scoringConfig={score_bands:{high:80,qualified:60,developing:40,low:0}};
 let me,status,leads=[],events=[],page='Leads',active=null,auto=false,index=0,clock,connection,startTime;
-async function api(path,data){const r=await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok){let error=await r.json();throw Error(Array.isArray(error.detail)?error.detail.map(x=>x.msg).join('; '):(error.detail||'Request failed'))}return r.json()}
+async function api(path,data){
+ const changing=data!==undefined;let response;
+ try{response=await fetch('/api/'+path,changing?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{});}catch{throw Error('Could not reach Brassline. Check your connection and Render service status.'+(changing?' The request may have completed; check the page or history before trying again.':''));}
+ const raw=await response.text();let result;
+ try{result=JSON.parse(raw);}catch{
+  const temporary=[502,503,504].includes(response.status);
+  throw Error((temporary?'Brassline is temporarily unavailable (HTTP '+response.status+'). Render may be restarting or deploying.':'The server returned a web page instead of app data (HTTP '+response.status+'). Check the Render service status.')+(changing?' Check whether your action completed before trying again. No automatic retry was made.':' Wait until the service is Live, then refresh.'));
+ }
+ if(!response.ok){const detail=result?.detail;throw Error(Array.isArray(detail)?detail.map(x=>x.msg).join('; '):(typeof detail==='string'?detail:'Request failed (HTTP '+response.status+').'));}
+ return result;
+}
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
 function action(text,fn,cls){const b=el('button',text,cls);b.type='button';b.onclick=async()=>{try{await fn()}catch(e){$('notice').textContent=e.message}};return b}
 function showAuth(registering,invitation=''){
