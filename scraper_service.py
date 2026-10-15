@@ -16,6 +16,7 @@ class NewRun(BaseModel):
     industry:str=Field(min_length=2,max_length=150)
     location_id:str=Field(min_length=2,max_length=160)
     radius_km:int=Field(default=20,ge=5,le=50)
+    radius_miles:float|None=Field(default=None,ge=3.2,le=31)
     max_tiles:int=Field(default=12,ge=1,le=60)
     max_leads:int=Field(default=60,ge=1,le=300)
 
@@ -174,13 +175,14 @@ def install(app,connect,user,practice):
         uid=user(request)['id'];location=location_index().get(data.location_id)
         if not location:raise HTTPException(400,'Choose a city or state from the suggestions')
         selected=industry(data.industry)
+        radius_km=data.radius_miles*1.609344 if data.radius_miles is not None else data.radius_km
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT id FROM scraper_runs WHERE user_id=? AND state IN ('queued','running','cancel_requested')",(uid,)).fetchone():raise HTTPException(409,'Finish or stop the current run before starting another')
             done=[r[0] for r in db.execute('SELECT tile_key FROM search_tiles WHERE user_id=?',(uid,))]
-            tiles,remaining=plan_tiles(location,selected['wordings'],done,data.radius_km,data.max_tiles)
+            tiles,remaining=plan_tiles(location,selected['wordings'],done,radius_km,data.max_tiles)
             if not tiles:raise HTTPException(400,'All planned tiles for this area and industry have already been searched. Choose a larger radius or another area.')
-            config={'industry':selected,'location':location,'tiles':tiles,'radius_km':data.radius_km,'max_leads':data.max_leads,'remaining_tiles_estimate':remaining,'scraper':settings()['scraper']}
+            config={'industry':selected,'location':location,'tiles':tiles,'radius_km':radius_km,'radius_miles':radius_km/1.609344,'max_leads':data.max_leads,'remaining_tiles_estimate':remaining,'scraper':settings()['scraper']}
             batch=db.execute('INSERT INTO batches(user_id,name) VALUES(?,?)',(uid,selected['label']+' · '+location['label'])).lastrowid
             run=db.execute('INSERT INTO scraper_runs(user_id,batch_id,config,created_at,updated_at) VALUES(?,?,?,?,?)',(uid,batch,json.dumps(config),datetime.now(timezone.utc).isoformat(),time.time())).lastrowid
         return {'run_id':run,'tiles':len(tiles),'remaining_tiles_estimate':remaining}
