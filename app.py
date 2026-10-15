@@ -81,7 +81,7 @@ def session_response(uid):
 
 @app.middleware('http')
 async def guard(request, call_next):
-    if request.method not in ('GET','HEAD','OPTIONS') and request.url.path not in ('/api/twilio/voice','/api/twilio/status','/api/twilio/transcription','/api/twilio/stream-status'):
+    if request.method not in ('GET','HEAD','OPTIONS') and request.url.path not in ('/api/twilio/voice','/api/twilio/status','/api/twilio/transcription','/api/twilio/stream-status','/api/twilio/recording-status'):
         origin=request.headers.get('origin')
         expected=os.getenv('PUBLIC_BASE_URL','') if ONLINE and os.getenv('PUBLIC_BASE_URL') else str(request.base_url).rstrip('/')
         def origin_key(value):

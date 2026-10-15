@@ -88,7 +88,7 @@ def install(app,connect,user,practice):
         if not row['dial_dispatched'] or row['result_recorded'] or row['manual_stop'] or row['answered_seen'] or (pref and not pref['auto_no_answer']):return
         if db.execute('SELECT 1 FROM call_events WHERE attempt_id=? AND ignored=0',(row['id'],)).fetchone():return
         db.execute("INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at,recording_method) VALUES(?,?,'No Answer','dialer',?,?,?,?,?,'provider_no_answer')",(row['user_id'],row['lead_id'],row['started_at'],row['caller_number'],row['script_id'],row['id'],timestamp()))
-        db.execute("UPDATE dial_attempts SET status='ended',result_recorded=1,auto_result=1 WHERE id=?",(row['id'],))
+        db.execute("UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),status='ended',result_recorded=1,auto_result=1 WHERE id=?",(row['id'],))
         db.execute("UPDATE followups SET state='completed' WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(row['user_id'],row['lead_id'],row['started_at']))
         db.execute("INSERT INTO lead_sales(user_id,lead_id,stage) VALUES(?,?,'Contacted') ON CONFLICT(user_id,lead_id) DO UPDATE SET stage=CASE WHEN lead_sales.stage='New' THEN 'Contacted' ELSE lead_sales.stage END",(row['user_id'],row['lead_id']))
 
@@ -234,7 +234,7 @@ def install(app,connect,user,practice):
             failed=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND lead_id=? ORDER BY started_at DESC,id DESC LIMIT 1',(u['id'],lead['id'])).fetchone()
             retry_failure=bool(data.retry_failed and failed and failed['status']=='failed' and not failed['answered_seen'])
             if data.retry_failed and not retry_failure:raise HTTPException(409,'Only a confirmed failed, unanswered connection can be retried this way')
-            if retry_failure:db.execute('UPDATE dial_attempts SET result_recorded=1 WHERE id=?',(failed['id'],))
+            if retry_failure:db.execute('UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),result_recorded=1 WHERE id=?',(failed['id'],))
             if db.execute('SELECT id FROM dial_attempts WHERE user_id=? AND result_recorded=0',(u['id'],)).fetchone():raise HTTPException(409,'Finish the current call result before starting another')
             if data.list_id and not db.execute('SELECT 1 FROM calling_list_members m JOIN calling_lists l ON l.id=m.list_id WHERE l.id=? AND l.user_id=? AND m.lead_id=?',(data.list_id,u['id'],lead['id'])).fetchone():raise HTTPException(409,'Lead was removed from this calling list')
             from leads_service import row_dict
@@ -275,7 +275,7 @@ def install(app,connect,user,practice):
         with connect() as db:
             db.execute('BEGIN IMMEDIATE');row=owned_attempt(db,user(request)['id'],attempt_id)
             if row['status'] not in ('ended','failed'):raise HTTPException(409,'Hang up before finishing this call')
-            db.execute('UPDATE dial_attempts SET result_recorded=1 WHERE id=?',(attempt_id,))
+            db.execute('UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),result_recorded=1 WHERE id=?',(attempt_id,))
         return {'ok':True}
 
     @app.post('/api/dialer/attempts/{attempt_id}/hangup')
@@ -284,7 +284,7 @@ def install(app,connect,user,practice):
         with connect() as db:
             row=owned_attempt(db,uid,attempt_id);db.execute('UPDATE dial_attempts SET manual_stop=1 WHERE id=?',(attempt_id,))
         hangup(row)
-        with connect() as db:db.execute("UPDATE dial_attempts SET status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END WHERE id=?",(attempt_id,))
+        with connect() as db:db.execute("UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END WHERE id=?",(attempt_id,))
         return {'ok':True,'note':'Choose a result to finish this lead. No result was recorded automatically.'}
 
     @app.post('/api/dialer/attempts/{attempt_id}/result')
@@ -301,7 +301,7 @@ def install(app,connect,user,practice):
                 raise HTTPException(409,'Mark the previous result ignored before recording a correction')
             source='dialer' if row['dial_dispatched'] else 'leads'
             event=db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',(uid,row['lead_id'],data.result,source,row['started_at'],row['caller_number'],row['script_id'],attempt_id,timestamp())).lastrowid
-            db.execute("UPDATE dial_attempts SET status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END,result_recorded=1 WHERE id=?",(attempt_id,))
+            db.execute("UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END,result_recorded=1 WHERE id=?",(attempt_id,))
             db.execute("UPDATE followups SET state='completed' WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(uid,row['lead_id'],row['started_at']))
             db.execute("INSERT INTO lead_sales(user_id,lead_id,stage) VALUES(?,?,?) ON CONFLICT(user_id,lead_id) DO UPDATE SET stage=CASE WHEN lead_sales.stage IN ('New','Contacted') THEN excluded.stage ELSE lead_sales.stage END",(uid,row['lead_id'],'Meeting booked' if data.result=='Booked' else 'Contacted'))
         return {'ok':True,'event_id':event,'source':source}
@@ -362,11 +362,17 @@ def install(app,connect,user,practice):
             if not row or not row['twilio_sid'] or not form.get('CallSid') or (form.get('ParentCallSid') or form.get('CallSid'))!=row['twilio_sid']:raise HTTPException(403,'Call callback does not match')
             if row['child_sid'] and row['child_sid']!=form.get('CallSid'):raise HTTPException(403,'Call leg does not match')
             db.execute('UPDATE dial_attempts SET child_sid=COALESCE(child_sid,?) WHERE id=?',(form.get('CallSid'),attempt))
-            if form.get('CallStatus')=='in-progress':db.execute('UPDATE dial_attempts SET answered_seen=1 WHERE id=?',(attempt,))
+            if form.get('CallStatus')=='in-progress':db.execute('UPDATE dial_attempts SET answered_seen=1,answered_at=COALESCE(answered_at,?) WHERE id=?',(timestamp(),attempt))
             if form.get('CallStatus')=='no-answer':auto_no_answer(db,row)
+            if form.get('CallStatus') in ('completed','busy','no-answer','failed','canceled'):
+                duration=form.get('CallDuration','')
+                seconds=min(int(duration),86400) if str(duration).isdigit() else None
+                db.execute('UPDATE dial_attempts SET ended_at=COALESCE(ended_at,?),duration_seconds=COALESCE(?,duration_seconds) WHERE id=?',(timestamp(),seconds,attempt))
             state=mapping.get(form.get('CallStatus'))
             if state and not row['result_recorded'] and row['status'] not in ('ended','failed'):db.execute('UPDATE dial_attempts SET status=? WHERE id=?',(state,attempt))
         return Response(status_code=204)
 
     app.state.verified_twilio_form=verified_form
+    from call_history_service import install as install_history
+    install_history(app,connect,user,practice,verified_form)
 
