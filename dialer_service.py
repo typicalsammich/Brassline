@@ -49,6 +49,7 @@ class Preferences(BaseModel):
 class Begin(BaseModel):
     lead_id:int
     list_id:int=0
+    retry_failed:bool=False
 class CallingList(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     lead_ids:list[int]=Field(default_factory=list,max_length=5000)
@@ -196,7 +197,21 @@ def install(app,connect,user,practice):
                 if blocked(db,uid,r) or (sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))) or (last and last['result'] in ('Wrong Number','Not Interested','Booked')):raise HTTPException(409,'This number belongs to a blocked or completed lead. Review its contact status first.')
             lid=matches[0]['id'] if matches else db.execute("INSERT INTO leads(user_id,name,phone,facts) VALUES(?,?,?,'{}')",(uid,data.name.strip() or 'Manual call '+phone,'+1'+phone)).lastrowid
         saved=save_list(CallingList(name='Manual numbers',lead_ids=[lid]),request)
-        return {'lead_id':lid,'list_id':saved['id']}
+        with connect() as db:
+            previous=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND lead_id=? ORDER BY started_at DESC,id DESC LIMIT 1',(uid,lid)).fetchone()
+        # Older versions replaced a provider failure with 'ended' when saving a result.
+        # Confirm those historical failures with a read-only provider lookup on an explicit manual retry.
+        if previous and previous['mode']=='twilio' and previous['status']=='ended' and not previous['answered_seen'] and previous['child_sid']:
+            from shared_services import attempt_config
+            from twilio.rest import Client
+            cfg=attempt_config(previous)
+            try:provider_status=Client(cfg['TWILIO_ACCOUNT_SID'],cfg['TWILIO_AUTH_TOKEN']).calls(previous['child_sid']).fetch().status
+            except Exception:provider_status=None
+            if provider_status=='failed':
+                with connect() as db:
+                    db.execute("UPDATE dial_attempts SET status='failed' WHERE id=? AND status='ended' AND answered_seen=0",(previous['id'],))
+                    previous=db.execute('SELECT * FROM dial_attempts WHERE id=?',(previous['id'],)).fetchone()
+        return {'lead_id':lid,'list_id':saved['id'],'retry_failed':bool(previous and previous['status']=='failed' and not previous['answered_seen'])}
 
     @app.post('/api/dialer/preferences')
     def save_preferences(data:Preferences,request:Request):
@@ -210,9 +225,14 @@ def install(app,connect,user,practice):
         u=user(request);snapshot=view(u['id'],u['email'],data.list_id)
         if snapshot['mode']=='list':raise HTTPException(503,'Twilio is not configured. Practice mode works without an account.')
         lead=next((l for l in snapshot['queue'] if l['id']==data.lead_id and l['eligible']),None)
+        if data.retry_failed:lead=next((l for l in list_for(connect,u['id']) if l['id']==data.lead_id),None)
         if not lead:raise HTTPException(409,'This lead is not ready for a call today. Refresh the calling list.')
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            failed=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND lead_id=? ORDER BY started_at DESC,id DESC LIMIT 1',(u['id'],lead['id'])).fetchone()
+            retry_failure=bool(data.retry_failed and failed and failed['status']=='failed' and not failed['answered_seen'])
+            if data.retry_failed and not retry_failure:raise HTTPException(409,'Only a confirmed failed, unanswered connection can be retried this way')
+            if retry_failure:db.execute('UPDATE dial_attempts SET result_recorded=1 WHERE id=?',(failed['id'],))
             if db.execute('SELECT id FROM dial_attempts WHERE user_id=? AND result_recorded=0',(u['id'],)).fetchone():raise HTTPException(409,'Finish the current call result before starting another')
             if data.list_id and not db.execute('SELECT 1 FROM calling_list_members m JOIN calling_lists l ON l.id=m.list_id WHERE l.id=? AND l.user_id=? AND m.lead_id=?',(data.list_id,u['id'],lead['id'])).fetchone():raise HTTPException(409,'Lead was removed from this calling list')
             from leads_service import row_dict
@@ -226,7 +246,7 @@ def install(app,connect,user,practice):
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
             due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if not current or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (not due and ((history and not retry) or (last and last['result'] in ('Booked','Not Interested','Wrong Number')))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            if not current or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:
@@ -250,7 +270,7 @@ def install(app,connect,user,practice):
         with connect() as db:
             row=owned_attempt(db,uid,attempt_id);db.execute('UPDATE dial_attempts SET manual_stop=1 WHERE id=?',(attempt_id,))
         hangup(row)
-        with connect() as db:db.execute("UPDATE dial_attempts SET status='ended' WHERE id=?",(attempt_id,))
+        with connect() as db:db.execute("UPDATE dial_attempts SET status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END WHERE id=?",(attempt_id,))
         return {'ok':True,'note':'Choose a result to finish this lead. No result was recorded automatically.'}
 
     @app.post('/api/dialer/attempts/{attempt_id}/result')
@@ -267,7 +287,7 @@ def install(app,connect,user,practice):
                 raise HTTPException(409,'Mark the previous result ignored before recording a correction')
             source='dialer' if row['dial_dispatched'] else 'leads'
             event=db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',(uid,row['lead_id'],data.result,source,row['started_at'],row['caller_number'],row['script_id'],attempt_id,timestamp())).lastrowid
-            db.execute("UPDATE dial_attempts SET status='ended',result_recorded=1 WHERE id=?",(attempt_id,))
+            db.execute("UPDATE dial_attempts SET status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END,result_recorded=1 WHERE id=?",(attempt_id,))
             db.execute("UPDATE followups SET state='completed' WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(uid,row['lead_id'],row['started_at']))
             db.execute("INSERT INTO lead_sales(user_id,lead_id,stage) VALUES(?,?,?) ON CONFLICT(user_id,lead_id) DO UPDATE SET stage=CASE WHEN lead_sales.stage IN ('New','Contacted') THEN excluded.stage ELSE lead_sales.stage END",(uid,row['lead_id'],'Meeting booked' if data.result=='Booked' else 'Contacted'))
         return {'ok':True,'event_id':event,'source':source}
