@@ -1,3 +1,4 @@
+import hashlib
 import csv
 import io
 import json
@@ -50,7 +51,8 @@ class Edit(BaseModel):
 
 class Import(BaseModel):
     filename:str=Field(default='CSV import',max_length=200)
-    csv_text:str=Field(max_length=2000000)
+    csv_text:str=Field(default='',max_length=2000000)
+    xlsx_base64:str=Field(default='',max_length=7000000)
 
 class Bookkeeping(BaseModel):
     result:Literal['No Answer','Not Interested','Booked','Call Later','Wrong Number']
@@ -93,6 +95,8 @@ def list_for(connect, uid):
     return sorted(results,key=lambda lead:(not lead['priority_market'],-lead['score'],lead['id']))
 
 def install(app,connect,user,practice):
+    with connect() as db:
+        db.executescript('CREATE TABLE IF NOT EXISTS lead_import_files(batch_id INTEGER PRIMARY KEY REFERENCES batches(id),user_id INTEGER NOT NULL REFERENCES users(id),filename TEXT NOT NULL,content BLOB NOT NULL,kind TEXT NOT NULL);CREATE TABLE IF NOT EXISTS lead_import_records(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),lead_id INTEGER NOT NULL REFERENCES leads(id),batch_id INTEGER NOT NULL REFERENCES batches(id),record_hash TEXT NOT NULL,original TEXT NOT NULL,UNIQUE(user_id,lead_id,record_hash));')
     with connect() as db:
         columns={row[1] for row in db.execute('PRAGMA table_info(leads)')}
         for name in ['email','category','city','website_url','social_url','source_url','facts','website_check']:
@@ -153,23 +157,28 @@ def install(app,connect,user,practice):
     @app.get('/api/scoring-settings')
     def scoring_settings(request:Request):user(request);return settings()
 
+    @app.post('/api/leads/import-preview')
+    def import_preview(data:Import,request:Request):
+        user(request)
+        from lead_imports import parse_import
+        parsed=parse_import(data)
+        return {'rows':len(parsed['leads']),'section_rows':parsed['section_rows'],'columns':parsed['columns'],'warnings':parsed['warnings'][:30],'sample':[{k:v for k,v in row.items() if k!='_original'} for row in parsed['leads'][:5]],'preserves_original':True}
+    @app.get('/api/lead-imports/{batch_id}/original')
+    def original_import(batch_id:int,request:Request):
+        with connect() as db:row=db.execute('SELECT * FROM lead_import_files WHERE batch_id=? AND user_id=?',(batch_id,user(request)['id'])).fetchone()
+        if not row:raise HTTPException(404,'Import not found')
+        return Response(row['content'],media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if row['kind']=='xlsx' else 'text/csv',headers={'Content-Disposition':'attachment; filename="original-leads.'+row['kind']+'"'})
+
     @app.post('/api/leads/import')
     def import_csv(data:Import,request:Request):
         uid=user(request)['id']
-        try:
-            reader=csv.DictReader(io.StringIO(data.csv_text.lstrip('\ufeff')))
-            if not reader.fieldnames:raise HTTPException(400,'CSV needs a header row')
-            reader.fieldnames=[h.strip().lower() for h in reader.fieldnames]
-            if 'name' not in reader.fieldnames:raise HTTPException(400,'CSV needs a name column. Download the example for the supported columns.')
-            rows=[]
-            for row in reader:
-                if len(rows)>=2000:raise HTTPException(400,'Import at most 2,000 businesses at a time')
-                rows.append(row)
-        except csv.Error:raise HTTPException(400,'Could not read that CSV file')
-        added=merged=0;warnings=[]
+        from lead_imports import parse_import
+        parsed=parse_import(data);rows=parsed['leads']
+        added=merged=0;warnings=list(parsed['warnings'])
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             batch=db.execute('INSERT INTO batches(user_id,name) VALUES(?,?)',(uid,data.filename)).lastrowid
+            db.execute('INSERT INTO lead_import_files(batch_id,user_id,filename,content,kind) VALUES(?,?,?,?,?)',(batch,uid,data.filename,parsed['blob'] if parsed['blob'] is not None else data.csv_text.encode('utf-8'),'xlsx' if parsed['blob'] is not None else 'csv'))
             saved=[dict(r) for r in db.execute('SELECT * FROM leads WHERE user_id=? ORDER BY id',(uid,))]
             by_place={};by_phone={};by_name={}
             def remember(item):
@@ -194,6 +203,8 @@ def install(app,connect,user,practice):
                 else:
                     lead_id=db.execute('INSERT INTO leads(user_id,batch_id,'+','.join(FIELDS+['place_id'])+') VALUES('+','.join('?' for _ in range(len(FIELDS)+3))+')',[uid,batch]+[item[f] for f in FIELDS+['place_id']]).lastrowid;added+=1
                 db.execute('INSERT OR IGNORE INTO lead_batches VALUES(?,?)',(lead_id,batch))
+                original=json.dumps(row['_original'],ensure_ascii=False);record_hash=hashlib.sha256((parsed['file_hash']+original).encode()).hexdigest()
+                db.execute('INSERT OR IGNORE INTO lead_import_records(user_id,lead_id,batch_id,record_hash,original) VALUES(?,?,?,?,?)',(uid,lead_id,batch,record_hash,original))
                 current=owned(db,uid,lead_id)
                 remember(existing if existing else dict(current))
                 if current['website_url'] and not current['website_check']:queue(db,lead_id)
@@ -211,11 +222,12 @@ def install(app,connect,user,practice):
     @app.get('/api/leads/export')
     def export(request:Request):
         output=io.StringIO(newline='');writer=csv.writer(output)
-        fields=['name','phone','place_id','email','category','city','website_url','social_url','source_url','score','state','last_result','last_call','owner_name','owner_role','owner_phone','owner_source','qualification_reason','evidence_sources','facts_json','website_check_json','review_facts_json']
+        fields=['name','phone','place_id','email','category','city','website_url','social_url','source_url','score','state','last_result','last_call','owner_name','owner_role','owner_phone','owner_source','qualification_reason','evidence_sources','facts_json','website_check_json','review_facts_json','imported_rows_json']
         writer.writerow(fields)
         for lead in list_for(connect,user(request)['id']):
             lead.update({f:lead['facts'].get(f,'') for f in ['owner_name','owner_role','owner_phone','owner_source']})
             lead['qualification_reason']='; '.join(lead['reasons']);lead['evidence_sources']='; '.join(s['url'] for s in lead['sources']);lead['facts_json']=json.dumps(lead['facts']);lead['website_check_json']=json.dumps(lead['website_check']);lead['review_facts_json']=lead.get('review_facts','{}')
+            with connect() as db:lead['imported_rows_json']=json.dumps([json.loads(r['original']) for r in db.execute('SELECT original FROM lead_import_records WHERE user_id=? AND lead_id=?',(user(request)['id'],lead['id']))],ensure_ascii=False)
             values=[]
             for field in fields:
                 value=str(lead.get(field) or '')
@@ -229,6 +241,7 @@ def install(app,connect,user,practice):
         uid=user(request)['id']
         with connect() as db:
             lead=row_dict(owned(db,uid,lead_id))
+            lead['imported_rows']=[{**dict(r),'original':json.loads(r['original'])} for r in db.execute('SELECT r.original,r.batch_id,f.filename FROM lead_import_records r JOIN lead_import_files f ON f.batch_id=r.batch_id WHERE r.user_id=? AND r.lead_id=? ORDER BY r.id',(uid,lead_id))]
             lead['events']=[dict(r) for r in db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id=? ORDER BY id DESC',(uid,lead_id))]
             return lead
 

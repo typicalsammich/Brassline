@@ -6,3 +6,6 @@ Pillow>=10,<13
 
 cryptography>=44,<49
 websockets>=15,<16
+
+openpyxl>=3.1.5,<4
+defusedxml>=0.7.1,<1

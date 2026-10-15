@@ -101,3 +101,10 @@ Forgot password now opens a dialog to request a six-digit email code. Codes expi
 
 ### Welcome tour and Help
 The first dashboard visit opens a short walkthrough with Next, Back, and Skip tour. Finishing or skipping is saved on your account across devices. Help sits at the bottom of the sidebar and includes searchable feature explanations, account recovery guidance, setup requirements, and Replay welcome tour. The walkthrough highlights navigation but does not run research, place calls, or enable services. Administrators receive an additional setup step.
+
+
+### Import Excel without losing source details
+Leads > Import Excel / CSV accepts .xlsx up to 5 MB or CSV up to 2 MB, with at most 2,000 business rows. Review the preview before confirming. Common headers such as NAME OF THE BUSINESS, BUSINESS OWNER, NO., LOCATION and LINKS are supported. Original columns, owner text, section headings, formulas/cell notes, and hyperlink destinations remain accessible under Original imported information in each lead; imported owner names are not automatically verified. The original uploaded file is stored privately and can be downloaded there, preserving workbook formatting. Repeated business records merge without overwriting existing fields; distinct source rows remain attached. CSV export includes imported_rows_json for those source details. Existing website URLs are checked; listing links are not assumed to be business websites.
+
+### Account allowances
+Shared services > Account allowances has a searchable member list and Manage allowance for one account at a time. Set access to Allowed or Paused, enter monthly limits, then confirm with your administrator password. 0 blocks an individual service. Provider switches and the whole-team pool still apply; account limits do not create independent provider credit. Deepgram transcription limits now display call minutes and convert to two audio-minute units internally. Old limits and usage remain intact. Personal Twilio calls are separate from administrator-funded calling budgets.
