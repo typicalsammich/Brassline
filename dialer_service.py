@@ -141,6 +141,7 @@ def install(app,connect,user,practice):
             active={key:pending[key] for key in ['id','lead_id','status','mode','started_at','caller_number','route_reason','script_id','call_limit_seconds','sponsored']}
         if active:
             active['script_snapshot']=json.loads(pending['script_snapshot'])
+            active['coach_profile_name']=json.loads(pending['coach_profile_snapshot'] or '{}').get('name','Default coach')
             active['funding']='Administrator-funded' if pending['sponsored'] else 'Your Twilio account'
         return {'lists':lists,'list_id':list_id,'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
 
@@ -257,13 +258,17 @@ def install(app,connect,user,practice):
                 number,reason=choose_number(pool,lead['phone'],counters,centres)
                 db.execute('INSERT INTO number_rotation VALUES(?,?,1) ON CONFLICT(user_id,number) DO UPDATE SET uses=uses+1',(u['id'],number))
             script=db.execute("SELECT s.* FROM scripts s JOIN script_preferences p ON p.active_script=s.id WHERE p.user_id=? AND s.user_id=? AND s.kind='call' AND s.archived=0 AND s.deleted=0",(u['id'],u['id'])).fetchone()
+            from coach_profiles import snapshot as profile_snapshot
+            coach_profile=profile_snapshot(db,u['id'])
+            if coach_profile.get('script'):script=coach_profile['script']
             script_snapshot=dict(script) if script else {}
             attempt=secrets.token_urlsafe(24)
             from shared_services import calling_reservation
             call_limit=calling_reservation(db,u['id'],attempt,cfg) if snapshot['mode']!='practice' else 0
             db.execute('INSERT INTO dial_attempts(id,user_id,lead_id,started_at,status,mode,dial_dispatched,phone,caller_number,route_reason,script_id,script_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(attempt,u['id'],lead['id'],timestamp(),'ringing' if practice else 'preparing',snapshot['mode'],int(practice),'+1'+phone_key(lead['phone']),number,reason,script['id'] if script else None,json.dumps(script_snapshot)))
+            db.execute('UPDATE dial_attempts SET coach_profile_snapshot=? WHERE id=?',(json.dumps(coach_profile),attempt))
             if snapshot['mode']!='practice':db.execute('UPDATE dial_attempts SET provider_owner=?,sponsored=?,call_limit_seconds=? WHERE id=?',(cfg['provider_owner'],int(cfg['sponsored']),call_limit,attempt))
-        return {'id':attempt,'funding':snapshot['funding'],'call_limit_seconds':call_limit,'lead_id':lead['id'],'mode':snapshot['mode'],'caller_number':number,'route_reason':reason,'script_id':script['id'] if script else None,'script_snapshot':script_snapshot}
+        return {'coach_profile_name':coach_profile.get('name','Default coach'),'id':attempt,'funding':snapshot['funding'],'call_limit_seconds':call_limit,'lead_id':lead['id'],'mode':snapshot['mode'],'caller_number':number,'route_reason':reason,'script_id':script['id'] if script else None,'script_snapshot':script_snapshot}
 
     @app.post('/api/dialer/attempts/{attempt_id}/finish-without-result')
     def finish_without_result(attempt_id:str,request:Request):

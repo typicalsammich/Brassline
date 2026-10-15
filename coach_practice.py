@@ -16,6 +16,8 @@ SCENARIOS=['Busy owner','Already has a website','Price conscious','Family built 
 
 def install(app,connect,user,practice):
     with connect() as db:db.execute('CREATE TABLE IF NOT EXISTS coach_practice_sessions(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,scenario TEXT NOT NULL,history TEXT NOT NULL,turns INTEGER NOT NULL DEFAULT 0,last_coach REAL NOT NULL DEFAULT 0,busy INTEGER NOT NULL DEFAULT 0,request_id TEXT,created_at REAL NOT NULL)')
+    with connect() as db:
+        if 'profile' not in {r[1] for r in db.execute('PRAGMA table_info(coach_practice_sessions)')}:db.execute("ALTER TABLE coach_practice_sessions ADD COLUMN profile TEXT NOT NULL DEFAULT '{}'")
     @app.get('/api/coaching/practice')
     def info(request:Request):
         uid=user(request)['id']
@@ -33,7 +35,9 @@ def install(app,connect,user,practice):
             db.execute('DELETE FROM coach_practice_sessions WHERE user_id=? AND created_at<? AND busy=0',(uid,time.time()-3600))
             sid=secrets.token_urlsafe(24)
             db.execute('INSERT INTO coach_practice_sessions(id,user_id,scenario,history,created_at) VALUES(?,?,?,?,?)',(sid,uid,data.scenario,'[]',time.time()))
-        return {'id':sid,'greeting':'Hello?','max_turns':12}
+            from coach_profiles import snapshot
+            profile=snapshot(db,uid);db.execute('UPDATE coach_practice_sessions SET profile=? WHERE id=?',(json.dumps(profile),sid))
+        return {'profile_name':profile.get('name','Default coach'),'id':sid,'greeting':'Hello?','max_turns':12}
     @app.post('/api/coaching/practice/{session_id}/turn')
     def turn(session_id:str,data:Turn,request:Request):
         uid=user(request)['id'];cfg=shared.config()
@@ -56,7 +60,8 @@ def install(app,connect,user,practice):
         except Exception:
             SLOTS.release();raise
         def events():
-            history_text='\n'.join(x['speaker']+': '+x['text'] for x in history[-20:])
+            from coach_profiles import context as profile_context
+            history_text=profile_context(json.loads(row['profile']))+'\n'+'\n'.join(x['speaker']+': '+x['text'] for x in history[-20:])
             def pack(value):return json.dumps(value)+'\n'
             try:
                 started=time.monotonic();prospect=''
@@ -70,9 +75,11 @@ def install(app,connect,user,practice):
                 safety=suggestions(prospect,[],'Practice business')
                 started=time.monotonic();first=None;answer=''
                 coach_context='Business: Fictional local service business\n'+'\n'.join(x['speaker']+': '+x['text'] for x in history[-20:])+objection_context(connect,uid)
+                from coach_profiles import context as profile_context
+                coach_context+=profile_context(json.loads(row['profile']))
                 prior=next((x['text'] for x in reversed(history) if x['speaker']=='coach'),'')
                 if prior:coach_context+='\nPrevious suggestion (do not repeat): '+prior
-                stream=[{'delta':safety['prompt']}] if safety['intent'] in ('stop','decline') else response_chunks(cfg,cfg['offer'],coach_context[:23000])
+                stream=[{'delta':safety['prompt']}] if safety['intent'] in ('stop','decline') else response_chunks(cfg,cfg['offer'],coach_context[:32000])
                 for chunk in stream:
                     if 'delta' not in chunk:continue
                     if first is None:first=round((time.monotonic()-started)*1000)
