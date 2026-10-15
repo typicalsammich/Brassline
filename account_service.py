@@ -99,6 +99,18 @@ def install(app,connect,user,practice,password_hash,verify):
             if db.execute('UPDATE invites SET revoked=1 WHERE token=? AND used=0',(identifier,)).rowcount!=1:raise HTTPException(404,'Unused invitation not found')
         return {'ok':True}
 
+    @app.post('/api/team/unlock')
+    def unlock(data:Recovery,request:Request):
+        u=admin(request);secure(u,data.current_password)
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            target=db.execute('SELECT email FROM users WHERE id=?',(data.user_id,)).fetchone()
+            if not target:raise HTTPException(404,'Account not found')
+            suffix=':'+target['email'].strip().lower()
+            keys=[r['key'] for r in db.execute('SELECT key FROM login_attempts') if r['key'].endswith(suffix)]
+            db.executemany('DELETE FROM login_attempts WHERE key=?',[(key,) for key in keys])
+        return {'ok':True,'cleared':len(keys),'email':target['email'],'message':'Sign-in lockout cleared. The account can try its current password again.'}
+
     @app.post('/api/team/recovery')
     def recovery(data:Recovery,request:Request):
         u=admin(request);secure(u,data.current_password);token=secrets.token_urlsafe(32)
@@ -116,3 +128,4 @@ def install(app,connect,user,practice,password_hash,verify):
             if not row:raise HTTPException(403,'Recovery link is invalid, expired, or already used')
             db.execute('UPDATE users SET password=? WHERE id=?',(password_hash(data.password),row['user_id']));db.execute('DELETE FROM sessions WHERE user_id=?',(row['user_id'],));db.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(row['user_id'],));db.execute('UPDATE recovery_codes SET used=1 WHERE user_id=?',(row['user_id'],))
         return {'ok':True}
+
