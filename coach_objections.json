@@ -1,0 +1,50 @@
+[
+  {
+    "objection": "I am busy",
+    "response": "No problem. Is there a better time for a brief call, or would you prefer I leave it here?"
+  },
+  {
+    "objection": "We already have a website",
+    "response": "That makes sense. Is there anything about it you wish worked better? If it does what you need, there may be no reason to change it."
+  },
+  {
+    "objection": "How much does it cost?",
+    "response": "It depends on the scope. What would you need the website to do? I can give you a clear quote once that is understood."
+  },
+  {
+    "objection": "We do not have the budget",
+    "response": "Understood. Is this something you want to revisit later, or is it simply not a priority?"
+  },
+  {
+    "objection": "Send me information",
+    "response": "Of course. What would be useful to include, and which business email should I use?"
+  },
+  {
+    "objection": "My friend or family built it",
+    "response": "That is completely fair. Would you want help with anything they have not had time to address, or are you happy with it?"
+  },
+  {
+    "objection": "We get enough work already",
+    "response": "That is good to hear. If you are happy with the amount and type of work, there may not be a need right now."
+  },
+  {
+    "objection": "I need to think about it",
+    "response": "Absolutely. Is there a particular question I can answer so you have what you need to decide?"
+  },
+  {
+    "objection": "I am not the decision maker",
+    "response": "Thanks for letting me know. Who normally handles the website, and is there an appropriate way to reach them?"
+  },
+  {
+    "objection": "Not interested",
+    "response": "Understood. Thanks for your time. End the conversation without pressure."
+  },
+  {
+    "objection": "Do not call again",
+    "response": "Understood. I will mark this number do not contact. Thank you. Stop the pitch and flag removal; never argue or continue selling."
+  },
+  {
+    "objection": "Who are you and why are you calling?",
+    "response": "Briefly introduce yourself and the purpose of the call, then ask permission for one question. Do not claim a previous relationship or a verified website problem unless supported."
+  }
+]
