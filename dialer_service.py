@@ -46,7 +46,15 @@ class Preferences(BaseModel):
     daily_goal:int=Field(ge=1,le=2000)
     timezone:str=Field(max_length=100)
     auto_no_answer:bool=True
-class Begin(BaseModel):lead_id:int
+class Begin(BaseModel):
+    lead_id:int
+    list_id:int=0
+class CallingList(BaseModel):
+    name:str=Field(min_length=1,max_length=100)
+    lead_ids:list[int]=Field(default_factory=list,max_length=5000)
+class ManualNumber(BaseModel):
+    phone:str=Field(max_length=80)
+    name:str=Field(default='',max_length=300)
 class Outcome(BaseModel):result:str=Field(max_length=100)
 
 def install(app,connect,user,practice):
@@ -54,6 +62,8 @@ def install(app,connect,user,practice):
         db.executescript('''
         CREATE TABLE IF NOT EXISTS dialer_preferences(user_id INTEGER PRIMARY KEY REFERENCES users(id),daily_goal INTEGER NOT NULL,timezone TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS dial_attempts(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),lead_id INTEGER NOT NULL REFERENCES leads(id),started_at TEXT NOT NULL,status TEXT NOT NULL,mode TEXT NOT NULL,dial_dispatched INTEGER NOT NULL DEFAULT 0,phone TEXT NOT NULL,caller_number TEXT,route_reason TEXT,twilio_sid TEXT,result_recorded INTEGER NOT NULL DEFAULT 0,script_id INTEGER);
+        CREATE TABLE IF NOT EXISTS calling_lists(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS calling_list_members(list_id INTEGER REFERENCES calling_lists(id) ON DELETE CASCADE,lead_id INTEGER REFERENCES leads(id),PRIMARY KEY(list_id,lead_id));
         CREATE TABLE IF NOT EXISTS number_rotation(user_id INTEGER REFERENCES users(id),number TEXT,uses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,number));
         ''')
         columns={r[1] for r in db.execute('PRAGMA table_info(call_events)')}
@@ -100,11 +110,15 @@ def install(app,connect,user,practice):
             row=db.execute('SELECT * FROM dialer_preferences WHERE user_id=?',(uid,)).fetchone()
         return dict(row) if row else {'daily_goal':config['default_goal'],'timezone':config['default_timezone'],'auto_no_answer':True}
 
-    def view(uid,email):
+    def view(uid,email,list_id=0):
         preferences=prefs(uid);tz=ZoneInfo(preferences['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date();rules=settings()['dialer']
         with connect() as db:
             events=[dict(row) for row in db.execute("SELECT * FROM call_events WHERE user_id=? AND source='dialer' AND ignored=0 ORDER BY id",(uid,))]
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
+        with connect() as db:
+            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,COUNT(m.lead_id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id WHERE l.user_id=? GROUP BY l.id ORDER BY l.id',(uid,))]
+            if list_id and not any(l['id']==list_id for l in lists):raise HTTPException(404,'Calling list not found')
+            members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
         outcomes={item['label']:item for item in rules['results']};answered=sum(bool(outcomes.get(e['result'],{}).get('answered')) for e in today_events);booked=sum(bool(outcomes.get(e['result'],{}).get('booked')) for e in today_events)
         from shared_services import calling_config
@@ -112,10 +126,11 @@ def install(app,connect,user,practice):
         queue=[];histories={}
         for event in events:histories.setdefault(event['lead_id'],[]).append(event)
         for lead in list_for(connect,uid):
+            if list_id and lead['id'] not in members:continue
             history=histories.get(lead['id'],[]);called_today=any(as_date(e['created_at'],tz)==today for e in history)
             retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
             due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
-            eligible=not blocked and lead['state']=='ready' and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
+            eligible=not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
             if eligible or called_today:
                 lead.update(eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(history),second_try=retry,latest_attempt_id=history[-1]['attempt_id'] if history else None)
                 queue.append(lead)
@@ -125,7 +140,7 @@ def install(app,connect,user,practice):
         if active:
             active['script_snapshot']=json.loads(pending['script_snapshot'])
             active['funding']='Administrator-funded' if pending['sponsored'] else 'Your Twilio account'
-        return {'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
+        return {'lists':lists,'list_id':list_id,'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
 
     def owned_attempt(db,uid,attempt_id):
         row=db.execute('SELECT * FROM dial_attempts WHERE id=? AND user_id=?',(attempt_id,uid)).fetchone()
@@ -141,7 +156,47 @@ def install(app,connect,user,practice):
             except Exception:raise HTTPException(502,'Could not confirm hang-up with Twilio. Auto-dial is paused; retry hang-up before continuing.')
 
     @app.get('/api/dialer')
-    def dashboard(request:Request):u=user(request);return view(u['id'],u['email'])
+    def dashboard(request:Request):
+        u=user(request)
+        try:list_id=int(request.query_params.get('list_id','0'))
+        except ValueError:raise HTTPException(400,'Invalid calling list')
+        return view(u['id'],u['email'],list_id)
+
+    @app.post('/api/dialer/lists')
+    def save_list(data:CallingList,request:Request):
+        uid=user(request)['id'];name=data.name.strip()
+        if not name:raise HTTPException(400,'Name your calling list')
+        visible={l['id'] for l in list_for(connect,uid)}
+        if not set(data.lead_ids)<=visible:raise HTTPException(404,'One or more leads are unavailable')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT id FROM calling_lists WHERE user_id=? AND name=?',(uid,name)).fetchone()
+            lid=row['id'] if row else db.execute('INSERT INTO calling_lists(user_id,name) VALUES(?,?)',(uid,name)).lastrowid
+            db.executemany('INSERT OR IGNORE INTO calling_list_members VALUES(?,?)',[(lid,i) for i in set(data.lead_ids)])
+        return {'id':lid,'name':name}
+
+    @app.post('/api/dialer/lists/{list_id}/remove')
+    def remove_member(list_id:int,data:Begin,request:Request):
+        with connect() as db:
+            if not db.execute('SELECT 1 FROM calling_lists WHERE id=? AND user_id=?',(list_id,user(request)['id'])).fetchone():raise HTTPException(404,'Calling list not found')
+            db.execute('DELETE FROM calling_list_members WHERE list_id=? AND lead_id=?',(list_id,data.lead_id))
+        return {'ok':True}
+
+    @app.post('/api/dialer/manual')
+    def manual(data:ManualNumber,request:Request):
+        uid=user(request)['id'];phone=phone_key(data.phone)
+        if not phone or not re.fullmatch(r'\+?[\d\s().-]+',data.phone):raise HTTPException(400,'Enter a US or Canadian number with 10 digits, optionally prefixed with +1')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            matches=[r for r in db.execute('SELECT * FROM leads WHERE user_id=?',(uid,)) if phone_key(r['phone'])==phone]
+            from crm_service import blocked
+            for r in matches:
+                sales=db.execute('SELECT * FROM lead_sales WHERE lead_id=? AND user_id=?',(r['id'],uid)).fetchone()
+                last=db.execute('SELECT result FROM call_events WHERE lead_id=? AND user_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(r['id'],uid)).fetchone()
+                if blocked(db,uid,r) or (sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))) or (last and last['result'] in ('Wrong Number','Not Interested','Booked')):raise HTTPException(409,'This number belongs to a blocked or completed lead. Review its contact status first.')
+            lid=matches[0]['id'] if matches else db.execute("INSERT INTO leads(user_id,name,phone,facts) VALUES(?,?,?,'{}')",(uid,data.name.strip() or 'Manual call '+phone,'+1'+phone)).lastrowid
+        saved=save_list(CallingList(name='Manual numbers',lead_ids=[lid]),request)
+        return {'lead_id':lid,'list_id':saved['id']}
 
     @app.post('/api/dialer/preferences')
     def save_preferences(data:Preferences,request:Request):
@@ -152,13 +207,14 @@ def install(app,connect,user,practice):
 
     @app.post('/api/dialer/attempts')
     def begin(data:Begin,request:Request):
-        u=user(request);snapshot=view(u['id'],u['email'])
+        u=user(request);snapshot=view(u['id'],u['email'],data.list_id)
         if snapshot['mode']=='list':raise HTTPException(503,'Twilio is not configured. Practice mode works without an account.')
         lead=next((l for l in snapshot['queue'] if l['id']==data.lead_id and l['eligible']),None)
         if not lead:raise HTTPException(409,'This lead is not ready for a call today. Refresh the calling list.')
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if db.execute('SELECT id FROM dial_attempts WHERE user_id=? AND result_recorded=0',(u['id'],)).fetchone():raise HTTPException(409,'Finish the current call result before starting another')
+            if data.list_id and not db.execute('SELECT 1 FROM calling_list_members m JOIN calling_lists l ON l.id=m.list_id WHERE l.id=? AND l.user_id=? AND m.lead_id=?',(data.list_id,u['id'],lead['id'])).fetchone():raise HTTPException(409,'Lead was removed from this calling list')
             from leads_service import row_dict
             fresh=db.execute('SELECT * FROM leads WHERE id=? AND user_id=?',(lead['id'],u['id'])).fetchone()
             current=row_dict(fresh) if fresh else None
@@ -170,7 +226,7 @@ def install(app,connect,user,practice):
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
             due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if not current or current['state']!='ready' or excluded or contact_blocked(db,u['id'],fresh) or (not due and ((history and not retry) or (last and last['result'] in ('Booked','Not Interested','Wrong Number')))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            if not current or (current['state']!='ready' and not data.list_id) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (not due and ((history and not retry) or (last and last['result'] in ('Booked','Not Interested','Wrong Number')))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:
@@ -279,3 +335,4 @@ def install(app,connect,user,practice):
         return Response(status_code=204)
 
     app.state.verified_twilio_form=verified_form
+
