@@ -2,7 +2,7 @@
 from datetime import datetime, timezone, timedelta
 
 DELAYS={'No Answer':1,'Voicemail':1,'Not Interested':30,'Hung Up':7}
-RESULTS=['No Answer','Voicemail','Not Interested','Hung Up','DNC','Callback','Booked','Wrong Number']
+RESULTS=['No Answer','Voicemail','Not Interested','Hung Up','Emailed','DNC','Callback','Booked','Wrong Number']
 
 def parsed(value):
     value=datetime.fromisoformat(value.replace('Z','+00:00'))
@@ -16,9 +16,9 @@ def schedule(db,uid,lead_id,at=None):
     ready=True;due=None;reason='Never called'
     if result in ('DNC','Wrong Number','Booked'):
         ready=False;reason={'DNC':'Do not call','Wrong Number':'Wrong number — excluded','Booked':'Meeting booked — excluded'}[result]
-    elif result in ('Callback','Call Later'):
+    elif result in ('Callback','Call Later','Emailed'):
         due=min((parsed(r['due_at']) for r in followups),default=None)
-        ready=due is not None and due<=at;reason='Callback due' if ready else 'Callback scheduled' if due else 'Choose a callback date and time'
+        ready=due is not None and due<=at;reason=('Email follow-up due' if result=='Emailed' else 'Callback due') if ready else ('Email follow-up scheduled' if result=='Emailed' else 'Callback scheduled') if due else 'Choose a follow-up date and time'
     elif result in DELAYS:
         # Use the time the disposition was saved, including older records without recorded_at.
         due=parsed(event['recorded_at'] or event['created_at'])+timedelta(days=DELAYS[result])
@@ -27,10 +27,10 @@ def schedule(db,uid,lead_id,at=None):
         ready=False;reason='Review previous result'
     elif followups:
         due=min(parsed(r['due_at']) for r in followups);ready=due<=at;reason='Callback due' if ready else 'Callback scheduled'
-    return {'call_ready':ready,'next_call_at':due.isoformat() if due else None,'schedule_reason':reason,'manual_retry_allowed':result not in ('DNC','Wrong Number','Booked','Callback','Call Later') and (result!='Not Interested' or ready)}
+    return {'call_ready':ready,'next_call_at':due.isoformat() if due else None,'schedule_reason':reason,'manual_retry_allowed':result not in ('DNC','Wrong Number','Booked','Callback','Call Later','Emailed') and (result!='Not Interested' or ready)}
 
 def apply_disposition(db,uid,lead_id,result):
-    if result in ('Callback','Call Later'):
+    if result in ('Callback','Call Later','Emailed'):
         db.execute("UPDATE followups SET state='cancelled' WHERE user_id=? AND lead_id=? AND state='open'",(uid,lead_id))
         return
     if result!='DNC':return
@@ -40,3 +40,10 @@ def apply_disposition(db,uid,lead_id,result):
     db.execute('UPDATE lead_sales SET do_not_contact=1 WHERE user_id=? AND lead_id=?',(uid,lead_id))
     for key in contact_keys(lead):db.execute('INSERT OR REPLACE INTO contact_blocks VALUES(?,?,?,?)',(uid,key,'DNC disposition',now()))
     db.execute("UPDATE followups SET state='cancelled' WHERE user_id=? AND lead_id=? AND state='open'",(uid,lead_id))
+
+AUTO_STAGES={'No Answer':'Awaiting reply','Voicemail':'Awaiting reply','Hung Up':'Follow-up needed','Not Interested':'Not interested','Emailed':'Emailed','Callback':'Callback scheduled','Call Later':'Callback scheduled','Booked':'Meeting booked','Wrong Number':'Invalid number'}
+STAGES=['New','Contacted','Awaiting reply','Follow-up needed','Emailed','Callback scheduled','Not interested','Invalid number','Meeting booked','Proposal sent','Won','Lost']
+def pipeline_stage(meta,result):
+    stage=meta['stage'] if meta else 'New'
+    if meta and (meta['stage_manual'] or stage in ('Meeting booked','Proposal sent','Won','Lost')):return stage
+    return AUTO_STAGES.get(result,stage)

@@ -58,7 +58,9 @@ class CallingList(BaseModel):
 class ManualNumber(BaseModel):
     phone:str=Field(max_length=80)
     name:str=Field(default='',max_length=300)
-class Outcome(BaseModel):result:str=Field(max_length=100)
+class Outcome(BaseModel):
+    result:str=Field(max_length=100)
+    note:str=Field(default='',max_length=5000)
 
 def install(app,connect,user,practice):
     with connect() as db:
@@ -81,7 +83,7 @@ def install(app,connect,user,practice):
         columns={r[1] for r in db.execute('PRAGMA table_info(dialer_preferences)')}
         if 'auto_no_answer' not in columns:db.execute('ALTER TABLE dialer_preferences ADD COLUMN auto_no_answer INTEGER NOT NULL DEFAULT 1')
         columns={r[1] for r in db.execute('PRAGMA table_info(dial_attempts)')}
-        for name,definition in [('manual_stop','INTEGER NOT NULL DEFAULT 0'),('answered_seen','INTEGER NOT NULL DEFAULT 0'),('auto_result','INTEGER NOT NULL DEFAULT 0'),('child_sid','TEXT')]:
+        for name,definition in [('manual_stop','INTEGER NOT NULL DEFAULT 0'),('answered_seen','INTEGER NOT NULL DEFAULT 0'),('auto_result','INTEGER NOT NULL DEFAULT 0'),('child_sid','TEXT'),('call_note',"TEXT NOT NULL DEFAULT ''")]:
             if name not in columns:db.execute(f'ALTER TABLE dial_attempts ADD COLUMN {name} {definition}')
 
     def auto_no_answer(db,row):
@@ -306,6 +308,9 @@ def install(app,connect,user,practice):
             if previous:
                 if previous['result']==data.result:return {'ok':True,'event_id':previous['id'],'already_saved':True}
                 raise HTTPException(409,'Mark the previous result ignored before recording a correction')
+            if data.note.strip():
+                db.execute("INSERT INTO lead_notes(user_id,lead_id,text,created_at,kind) VALUES(?,?,?,?,'call_note')",(uid,row['lead_id'],data.note.strip(),timestamp()))
+                db.execute('UPDATE dial_attempts SET call_note=? WHERE id=?',(data.note.strip(),attempt_id))
             from dispositions import apply_disposition
             apply_disposition(db,uid,row['lead_id'],data.result)
             source='dialer' if row['dial_dispatched'] else 'leads'

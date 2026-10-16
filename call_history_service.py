@@ -21,7 +21,7 @@ def install(app,connect,user,practice,verified_form):
         if not row:raise HTTPException(404,'Call not found')
         return row
     def item(db,row):
-        value={k:row[k] for k in ('id','lead_id','name','phone','caller_number','started_at','answered_at','ended_at','duration_seconds','status','mode','result_recorded','lead_deleted_at')}
+        value={k:row[k] for k in ('id','lead_id','name','phone','caller_number','started_at','answered_at','ended_at','duration_seconds','status','mode','result_recorded','lead_deleted_at','call_note')}
         event=db.execute('SELECT result FROM call_events WHERE attempt_id=? AND user_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(row['id'],row['user_id'])).fetchone()
         value['result']=event['result'] if event else None
         value['coach_profile']=json.loads(row['coach_profile_snapshot'] or '{}').get('name','Default coach')

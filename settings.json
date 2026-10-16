@@ -113,6 +113,11 @@
         "booked": false
       },
       {
+        "label": "Emailed",
+        "answered": true,
+        "booked": false
+      },
+      {
         "label": "DNC",
         "answered": true,
         "booked": false

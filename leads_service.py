@@ -55,7 +55,7 @@ class Import(BaseModel):
     xlsx_base64:str=Field(default='',max_length=7000000)
 
 class Bookkeeping(BaseModel):
-    result:Literal['No Answer','Voicemail','Not Interested','Hung Up','DNC','Callback','Booked','Call Later','Wrong Number']
+    result:Literal['No Answer','Voicemail','Not Interested','Hung Up','Emailed','DNC','Callback','Booked','Call Later','Wrong Number']
 
 FIELDS=['name','phone','email','category','city','website_url','social_url','source_url']
 
@@ -102,7 +102,8 @@ def list_for(connect, uid):
             lead['last_result']=event['result'] if event else ''
             from crm_service import blocked
             meta=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(uid,lead['id'])).fetchone()
-            lead.update(sales_stage=meta['stage'] if meta else 'New',quoted_cents=meta['quoted_cents'] if meta else None,agreed_cents=meta['agreed_cents'] if meta else None,do_not_contact=bool((meta and meta['do_not_contact']) or blocked(db,uid,lead)),assigned_out=bool(meta and meta['assigned_out']))
+            from dispositions import pipeline_stage
+            lead.update(sales_stage=pipeline_stage(meta,lead['last_result']),quoted_cents=meta['quoted_cents'] if meta else None,agreed_cents=meta['agreed_cents'] if meta else None,do_not_contact=bool((meta and meta['do_not_contact']) or blocked(db,uid,lead)),assigned_out=bool(meta and meta['assigned_out']))
             lead['followup_due']=bool(db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(uid,lead['id'],now())).fetchone())
             call=db.execute("SELECT created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 AND source='dialer' ORDER BY id DESC LIMIT 1",(uid,lead['id'])).fetchone()
             lead['last_call']=call['created_at'] if call else ''

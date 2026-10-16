@@ -5,7 +5,7 @@ from fastapi import Request,HTTPException
 from pydantic import BaseModel,Field
 from scoring import phone_key
 
-STAGES=['New','Contacted','Meeting booked','Proposal sent','Won','Lost']
+from dispositions import STAGES,pipeline_stage
 def now():return datetime.now(timezone.utc).isoformat()
 def contact_keys(lead):return [k for k in [('phone:'+phone_key(lead['phone'])) if phone_key(lead['phone']) else '',('place:'+lead['place_id']) if lead['place_id'] else ''] if k]
 def blocked(db,uid,lead):return any(db.execute('SELECT 1 FROM contact_blocks WHERE user_id=? AND contact_key=?',(uid,key)).fetchone() for key in contact_keys(lead))
@@ -32,6 +32,8 @@ def install(app,connect,user):
         CREATE INDEX IF NOT EXISTS followup_due_idx ON followups(user_id,state,due_at,lead_id);
         CREATE INDEX IF NOT EXISTS lead_note_idx ON lead_notes(user_id,lead_id,id);
         CREATE TRIGGER IF NOT EXISTS keep_lead_notes BEFORE UPDATE ON lead_notes BEGIN SELECT RAISE(ABORT,'Timeline entries cannot be overwritten'); END;''')
+    with connect() as db:
+        if 'stage_manual' not in {r[1] for r in db.execute('PRAGMA table_info(lead_sales)')}:db.execute('ALTER TABLE lead_sales ADD COLUMN stage_manual INTEGER NOT NULL DEFAULT 0')
     def log(db,uid,lead,text,kind='note'):db.execute('INSERT INTO lead_notes(user_id,lead_id,text,created_at,kind) VALUES(?,?,?,?,?)',(uid,lead,text,now(),kind))
     def initialize(db,uid,lead):db.execute('INSERT OR IGNORE INTO lead_sales(user_id,lead_id) VALUES(?,?)',(uid,lead))
 
@@ -52,7 +54,10 @@ def install(app,connect,user):
             calls=[{'id':r['id'],'kind':'call','text':r['result']+(' (ignored)' if r['ignored'] else '')+' · '+r['source'],'created_at':r['created_at']} for r in db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id=?',(uid,identifier))]
             followups=[dict(r) for r in db.execute('SELECT * FROM followups WHERE user_id=? AND lead_id=? ORDER BY due_at',(uid,identifier))]
             attempts=[{'id':r['id'],'started_at':r['started_at'],'mode':r['mode'],'transcription_enabled':r['transcription_enabled']} for r in db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND lead_id=? ORDER BY started_at DESC',(uid,identifier))]
-        return {'name':lead['name'],'sales':sales,'timeline':sorted(timeline+calls,key=lambda r:r['created_at'].replace(' ','T'),reverse=True),'followups':followups,'attempts':attempts}
+        with connect() as db:
+            event=db.execute('SELECT result FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(uid,identifier)).fetchone()
+            sales['stage']=pipeline_stage(sales,event['result'] if event else '')
+        return {'stages':STAGES,'name':lead['name'],'sales':sales,'timeline':sorted(timeline+calls,key=lambda r:r['created_at'].replace(' ','T'),reverse=True),'followups':followups,'attempts':attempts}
 
     @app.post('/api/crm/leads/{identifier}/sales')
     def sales(identifier:int,data:Sales,request:Request):
@@ -60,7 +65,7 @@ def install(app,connect,user):
         if data.stage not in STAGES:raise HTTPException(400,'Choose a sales stage')
         with connect() as db:
             owned(db,uid,identifier);initialize(db,uid,identifier)
-            db.execute('UPDATE lead_sales SET stage=?,quoted_cents=?,agreed_cents=? WHERE user_id=? AND lead_id=?',(data.stage,int(data.quoted*100) if data.quoted is not None else None,int(data.agreed*100) if data.agreed is not None else None,uid,identifier));log(db,uid,identifier,'Sales stage: '+data.stage,'sales')
+            db.execute('UPDATE lead_sales SET stage_manual=1,stage=?,quoted_cents=?,agreed_cents=? WHERE user_id=? AND lead_id=?',(data.stage,int(data.quoted*100) if data.quoted is not None else None,int(data.agreed*100) if data.agreed is not None else None,uid,identifier));log(db,uid,identifier,'Sales stage: '+data.stage,'sales')
         return {'ok':True}
 
     @app.post('/api/crm/leads/{identifier}/notes')

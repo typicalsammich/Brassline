@@ -64,3 +64,9 @@ See LAUNCH-GUIDE.md for the new workflow, remaining live checks, and private ser
 ## Save and find audio recordings
 
 During a connected real call, the bottom call bar has Record call. Confirm participant permission and Twilio recording/storage charges to start. The button changes to Recording · Stop; audio starts at that moment, not retroactively. Stopping or hanging up lets Twilio process the recording. Open the prominent Saved recordings button in Dialer, then View recording to play, download or delete audio. Call history & recordings shows all attempts, including those with no audio. Audio is held by Twilio until deleted; history and transcript text remain private to the account.
+
+## Email requests, notes, and automatic pipeline stages
+
+Emailed tracks a lead that asked for email information; it does not send email. Choose a follow-up date/time when prompted, or leave it on hold until one is scheduled. Open Call notes in the active call bar. Notes save with the result; Save note now saves immediately to that business’s conversation notes. Notes saved with a result also appear in its call-history detail.
+
+Existing and new dispositions automatically group ordinary leads into Awaiting reply (No Answer/Voicemail), Follow-up needed (Hung Up), Emailed, Callback scheduled, Not interested, Invalid number, and Meeting booked. Manual stage moves and existing meetings/proposals/won/lost stages are preserved, as are project values. DNC leads remain excluded. Existing Contacted leads are grouped from their latest saved result when viewed, without rewriting call history.
