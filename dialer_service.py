@@ -8,6 +8,7 @@ from starlette.datastructures import FormData
 from pydantic import BaseModel,Field
 from scoring import settings,phone_key
 from leads_service import list_for
+from dispositions import schedule
 
 def timestamp():return datetime.now(timezone.utc).isoformat()
 def as_date(value,tz):
@@ -96,7 +97,10 @@ def install(app,connect,user,practice):
     def attempt_state(attempt_id:str,request:Request):
         with connect() as db:
             row=owned_attempt(db,user(request)['id'],attempt_id)
-            return {key:row[key] for key in ['id','status','result_recorded','auto_result','answered_seen','manual_stop']}
+            result={key:row[key] for key in ['id','status','result_recorded','auto_result','answered_seen','manual_stop']}
+            recording=db.execute("SELECT status FROM call_recordings WHERE attempt_id=? AND user_id=? AND status!='deleted' ORDER BY created_at DESC LIMIT 1",(attempt_id,row['user_id'])).fetchone()
+            result['recording_status']=recording['status'] if recording else 'off'
+            return result
 
     @app.post('/api/dialer/attempts/{attempt_id}/simulate-no-answer')
     def simulate(attempt_id:str,request:Request):
@@ -123,7 +127,7 @@ def install(app,connect,user,practice):
             if list_id and not any(l['id']==list_id for l in lists):raise HTTPException(404,'Calling list not found')
             members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
-        outcomes={item['label']:item for item in rules['results']};answered=sum(bool(outcomes.get(e['result'],{}).get('answered')) for e in today_events);booked=sum(bool(outcomes.get(e['result'],{}).get('booked')) for e in today_events)
+        outcomes={item['label']:item for item in rules['results']};outcomes['Call Later']=outcomes.get('Callback',{});answered=sum(bool(outcomes.get(e['result'],{}).get('answered')) for e in today_events);booked=sum(bool(outcomes.get(e['result'],{}).get('booked')) for e in today_events)
         from shared_services import calling_config
         config=calling_config(uid);mode='practice' if practice else 'twilio' if config['enabled'] and number_pool(config,email) else 'list'
         queue=[];histories={}
@@ -132,12 +136,11 @@ def install(app,connect,user,practice):
             if list_id and lead['id'] not in members:continue
             history=histories.get(lead['id'],[]);called_today=any(as_date(e['created_at'],tz)==today for e in history)
             calls=[e for e in history if e['source']=='dialer']
-            no_answer_today=bool(history and history[-1]['result']=='No Answer' and as_date(history[-1]['created_at'],tz)==today)
-            retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
+            retry=bool(history and lead.get('call_ready') and lead['last_result'] in ('No Answer','Voicemail','Not Interested','Hung Up'))
             due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
-            eligible=not no_answer_today and not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and (due and lead['last_result']!='Wrong Number' or (not history or retry) and lead['last_result'] not in ('Not Interested','Booked','Wrong Number'))
-            if eligible or called_today:
-                lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['last_result'] not in ('Not Interested','Wrong Number','Booked') and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(calls),done_today=called_today and not eligible,second_try=retry,latest_attempt_id=calls[-1]['attempt_id'] if calls else None)
+            eligible=bool(not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and lead['call_ready'])
+            if eligible or called_today or (list_id and history):
+                lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['manual_retry_allowed'] and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(calls),done_today=called_today and not eligible,second_try=retry,latest_attempt_id=calls[-1]['attempt_id'] if calls else None)
                 queue.append(lead)
         active=None
         if pending:
@@ -199,7 +202,7 @@ def install(app,connect,user,practice):
             for r in matches:
                 sales=db.execute('SELECT * FROM lead_sales WHERE lead_id=? AND user_id=?',(r['id'],uid)).fetchone()
                 last=db.execute('SELECT result FROM call_events WHERE lead_id=? AND user_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(r['id'],uid)).fetchone()
-                if blocked(db,uid,r) or (sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))) or (last and last['result'] in ('Wrong Number','Not Interested','Booked')):raise HTTPException(409,'This number belongs to a blocked or completed lead. Review its contact status first.')
+                if blocked(db,uid,r) or (sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))) or (last and last['result'] in ('Wrong Number','DNC','Booked')) or not schedule(db,uid,r['id'])['manual_retry_allowed']:raise HTTPException(409,'This number belongs to a blocked or completed lead. Review its contact status first.')
             lid=matches[0]['id'] if matches else db.execute("INSERT INTO leads(user_id,name,phone,facts) VALUES(?,?,?,'{}')",(uid,data.name.strip() or 'Manual call '+phone,'+1'+phone)).lastrowid
         saved=save_list(CallingList(name='Manual numbers',lead_ids=[lid]),request)
         with connect() as db:
@@ -246,13 +249,13 @@ def install(app,connect,user,practice):
             history=db.execute("SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id",(u['id'],lead['id'])).fetchall()
             tz=ZoneInfo(snapshot['preferences']['timezone']);today=datetime.now(timezone.utc).astimezone(tz).date()
             last=db.execute('SELECT result FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(u['id'],lead['id'])).fetchone()
-            retry=len(history)==1 and history[0]['result']=='No Answer' and as_date(history[0]['created_at'],tz)<today
-            no_answer_today=bool(history and history[-1]['result']=='No Answer' and as_date(history[-1]['created_at'],tz)==today)
+            from dispositions import schedule
+            timing=schedule(db,u['id'],lead['id'])
             from crm_service import blocked as contact_blocked
             sales=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(u['id'],lead['id'])).fetchone()
-            due=db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(u['id'],lead['id'],timestamp())).fetchone()
             excluded=sales and (sales['do_not_contact'] or sales['assigned_out'] or sales['stage'] in ('Won','Lost'))
-            if (no_answer_today and not data.manual_repeat and not retry_failure) or not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id and not data.manual_repeat) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or (last and last['result'] in ('Not Interested','Wrong Number')) or (not due and ((history and not retry and not retry_failure and not data.manual_repeat) or (last and last['result']=='Booked'))) or (due and last and last['result']=='Wrong Number'):raise HTTPException(409,'Lead eligibility changed. Refresh the calling list.')
+            allowed=timing['call_ready'] or ((data.manual_repeat or retry_failure) and timing['manual_retry_allowed'])
+            if not current or fresh['deleted_at'] or (current['state']!='ready' and not data.list_id and not data.manual_repeat) or (current and (not phone_key(current['phone']) or any(current['facts'].get(k) for k in ('permanently_closed','illegitimate')))) or excluded or contact_blocked(db,u['id'],fresh) or not allowed:raise HTTPException(409,'Lead is not ready: '+timing['schedule_reason']+'. Refresh the calling list.')
             lead['phone']=current['phone']
             if snapshot['mode']=='practice':number='Practice line';reason='Simulated call — no real connection'
             else:
@@ -293,7 +296,7 @@ def install(app,connect,user,practice):
 
     @app.post('/api/dialer/attempts/{attempt_id}/result')
     def record(attempt_id:str,data:Outcome,request:Request):
-        uid=user(request)['id'];labels={r['label'] for r in settings()['dialer']['results']}
+        uid=user(request)['id'];labels={r['label'] for r in settings()['dialer']['results']}|{'Call Later'}
         if data.result not in labels:raise HTTPException(400,'Unknown call result')
         with connect() as db:row=owned_attempt(db,uid,attempt_id)
         hangup(row)
@@ -303,6 +306,8 @@ def install(app,connect,user,practice):
             if previous:
                 if previous['result']==data.result:return {'ok':True,'event_id':previous['id'],'already_saved':True}
                 raise HTTPException(409,'Mark the previous result ignored before recording a correction')
+            from dispositions import apply_disposition
+            apply_disposition(db,uid,row['lead_id'],data.result)
             source='dialer' if row['dial_dispatched'] else 'leads'
             event=db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at,caller_number,script_id,attempt_id,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',(uid,row['lead_id'],data.result,source,row['started_at'],row['caller_number'],row['script_id'],attempt_id,timestamp())).lastrowid
             db.execute("UPDATE dial_attempts SET ended_at=COALESCE(ended_at,CURRENT_TIMESTAMP),status=CASE WHEN status='failed' THEN 'failed' ELSE 'ended' END,result_recorded=1 WHERE id=?",(attempt_id,))

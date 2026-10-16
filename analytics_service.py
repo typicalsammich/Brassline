@@ -53,6 +53,7 @@ def install(app,connect,user):
             d=datetime.fromisoformat(value.replace('Z','+00:00'));return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).astimezone(tz)
         rows=[r for r in rows if first<=local(r['created_at']).date()<=last]
         outcomes={r['label']:r for r in settings()['dialer']['results']}
+        outcomes['Call Later']=outcomes.get('Callback',{})
         for r in rows:r['answered']=bool(outcomes.get(r['result'],{}).get('answered'));r['booked']=bool(outcomes.get(r['result'],{}).get('booked'))
         milestones={}
         for c in conversions:milestones.setdefault(c['call_event_id'],{})[c['stage']]=c['id']

@@ -3,17 +3,17 @@
 No Twilio account, number, credit card, or microphone permission is needed to try this.
 
 1. Close the old dashboard command window, then double-click `start-practice.cmd`. The launcher updates any missing Python dependencies for free.
-2. Open http://127.0.0.1:8000 and select Dialer. Only qualified, never-called leads and eligible second tries enter the calling list. Businesses called today stay visible in the list.
+2. Open http://127.0.0.1:8000 and select Dialer. Qualified leads enter when their disposition schedule permits; named lists can also contain unresearched imports. Businesses called today stay visible in the list.
 3. Set your daily goal and time zone, then click Save goal. The initial goal is 50 and the default time zone is America/New_York; change them to suit you.
 4. Click Start practice auto-dial and confirm. The first fictional lead pretends to ring and connect.
-5. Choose No Answer, Not Interested, Booked, Call Later, or Wrong Number. That manual choice finishes the call and starts the next eligible lead if auto-dial is still running.
+5. Choose No Answer, Voicemail, Not Interested, Hung Up, DNC, Callback, Booked, or Wrong Number. That manual choice finishes the call and starts the next eligible lead if auto-dial is still running.
 6. Try Hang up without selecting a result: it does not record anything or advance. Choose a result afterward to continue. Pause after result stops auto-dial after you finish the current lead.
 
 The call panel stays at the bottom, with the business name, timer, caller line, mute, pause, hang-up, and quick results. Practice mute changes its on-screen state; there is no real audio connection.
 
 # How the list and numbers work
 
-Row order is fixed until you explicitly click Refresh calling list. Saving a result updates that row without moving it. A lead whose only Dialer result was No Answer becomes eligible for one second try from the following day onward, in your chosen time zone. A second No Answer finishes ordinary outreach. Call Later now opens a date/time scheduler. Due qualified callbacks can explicitly return a business to the calling queue. Wrong Number, do-not-contact, assigned-out, Won and Lost leads remain excluded.
+Row order stays stable during an auto-dial run. Refresh the calling list to load newly due leads. Each saved disposition resets its wait: No Answer and Voicemail return after 24 hours, Hung Up after 7 days, Not Interested after 30 days. This replaces the former two-attempt limit. Callback opens a date/time scheduler and holds the lead until that requested instant; cancelling the scheduler leaves it on hold. A new Callback disposition supersedes old open callbacks. Legacy Call Later results still follow their saved callback time. DNC blocks matching contacts and cancels open callbacks; Wrong Number, assigned-out, Won and Lost leads remain excluded. Booked leads stay excluded. Deliberate manual retries are available for unanswered calls, but do not bypass DNC, Wrong Number, booked leads, callback holds or a Not Interested waiting period.
 
 Today’s dials, answered calls, and bookings come only from non-ignored call_events rows with source `dialer`. An unfinished call is tracked separately and is not counted in those result-based totals until you choose a result. Answer rate is answered / dials; booking rate is booked / answered. By default, Not Interested, Booked, and Call Later count as answered; Wrong Number does not assume someone answered. These definitions live in `settings.json` under `dialer.results`.
 
@@ -60,3 +60,7 @@ Live transcription remains disabled until TWILIO_TRANSCRIPTION_ENABLED=1 and cal
 Transcript text is private to the owning account, retained up to 30 days in the active database, and can be exported/deleted from the business timeline. Deletion prevents late callbacks from recreating text. Older backups can retain it. The app saves no audio files; the provider processes live audio. No real audio was transcribed in implementation tests.
 
 See LAUNCH-GUIDE.md for the new workflow, remaining live checks, and private service configuration.
+
+## Save and find audio recordings
+
+During a connected real call, the bottom call bar has Record call. Confirm participant permission and Twilio recording/storage charges to start. The button changes to Recording · Stop; audio starts at that moment, not retroactively. Stopping or hanging up lets Twilio process the recording. Open the prominent Saved recordings button in Dialer, then View recording to play, download or delete audio. Call history & recordings shows all attempts, including those with no audio. Audio is held by Twilio until deleted; history and transcript text remain private to the account.

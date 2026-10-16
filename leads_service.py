@@ -55,7 +55,7 @@ class Import(BaseModel):
     xlsx_base64:str=Field(default='',max_length=7000000)
 
 class Bookkeeping(BaseModel):
-    result:Literal['No Answer','Not Interested','Booked','Call Later','Wrong Number']
+    result:Literal['No Answer','Voicemail','Not Interested','Hung Up','DNC','Callback','Booked','Call Later','Wrong Number']
 
 FIELDS=['name','phone','email','category','city','website_url','social_url','source_url']
 
@@ -106,6 +106,8 @@ def list_for(connect, uid):
             lead['followup_due']=bool(db.execute("SELECT 1 FROM followups WHERE user_id=? AND lead_id=? AND state='open' AND due_at<=?",(uid,lead['id'],now())).fetchone())
             call=db.execute("SELECT created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 AND source='dialer' ORDER BY id DESC LIMIT 1",(uid,lead['id'])).fetchone()
             lead['last_call']=call['created_at'] if call else ''
+            from dispositions import schedule
+            lead.update(schedule(db,uid,lead['id']))
             lead['batch_ids']=[r[0] for r in db.execute('SELECT batch_id FROM lead_batches JOIN batches ON batches.id=lead_batches.batch_id WHERE lead_id=? AND batches.deleted_at IS NULL',(lead['id'],))]
     return sorted(results,key=lambda lead:(not lead['priority_market'],-lead['score'],lead['id']))
 
@@ -311,5 +313,6 @@ def install(app,connect,user,practice):
         with connect() as db:
             owned(db,uid,lead_id)
             db.execute('INSERT INTO call_events(user_id,lead_id,result,source,created_at) VALUES(?,?,?,?,?)',(uid,lead_id,data.result,'leads',now()))
+            from dispositions import apply_disposition
+            apply_disposition(db,uid,lead_id,data.result)
         return {'ok':True,'note':'Bookkeeping saved. This does not count as a dial.'}
-

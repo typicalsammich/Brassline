@@ -98,7 +98,27 @@
         "booked": false
       },
       {
+        "label": "Voicemail",
+        "answered": false,
+        "booked": false
+      },
+      {
         "label": "Not Interested",
+        "answered": true,
+        "booked": false
+      },
+      {
+        "label": "Hung Up",
+        "answered": true,
+        "booked": false
+      },
+      {
+        "label": "DNC",
+        "answered": true,
+        "booked": false
+      },
+      {
+        "label": "Callback",
         "answered": true,
         "booked": false
       },
@@ -106,11 +126,6 @@
         "label": "Booked",
         "answered": true,
         "booked": true
-      },
-      {
-        "label": "Call Later",
-        "answered": true,
-        "booked": false
       },
       {
         "label": "Wrong Number",

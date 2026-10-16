@@ -46,7 +46,7 @@ Archive removes a script from active choices, and Restore brings it back. Delete
 
 Real calling is prepared but disabled until Twilio is configured. There is no paid calling enabled now. Use Practice to try the entire flow without a Twilio account or microphone.
 
-Open Dialer. Start practice auto-dial or choose Call for a single eligible lead. Select a result after an answered call: No Answer, Not Interested, Booked, Call Later or Wrong Number. Automatic No Answer can save a provider-confirmed unanswered result and advance when auto-dial is running. Busy, failed, cancelled, answered voicemail and manual hang-up remain manual. Call Later opens a date/time scheduler. Pause after result stops auto-dial after the current result. Rows stay in place until you refresh the list.
+Open Dialer. Start practice auto-dial or choose Call for a single eligible lead. Select a result after an answered call: No Answer, Voicemail, Not Interested, Hung Up, DNC, Callback, Booked or Wrong Number. Automatic No Answer can save a provider-confirmed unanswered result and advance when auto-dial is running. Busy, failed, cancelled, answered voicemail and manual hang-up remain manual. Callback opens a date/time scheduler. Voicemail/No Answer wait 24 hours, Hung Up 7 days, Not Interested 30 days; DNC prevents future calls. Refresh the list to load newly due leads. Pause after result stops auto-dial after the current result. Rows stay in place until you refresh the list.
 
 During a call, Show script opens the version captured when the call started. The business name fills [Business], and the chosen objection answers appear below the script. The reader stays above your call controls and closes when the call ends. Its text area and objection row can scroll independently.
 
@@ -92,7 +92,7 @@ Research and Shared services are now available. The administrator can configure 
 
 ## Separate Deepgram transcription funding
 
-Shared services now offers Deepgram in addition to native Twilio transcription. An administrator Deepgram key can fund live transcripts on members’ personal Twilio calls, with per-account/team audio-minute limits and a per-session deadline. Callers acknowledge their Twilio streaming charge before starting permitted transcription. Two tracks produce labelled private text and feed the opt-in AI coach; audio recordings/playback are not implemented. See DEEPGRAM-SETUP.md for setup and current initial/ongoing cost estimates. Live provider and Render checks are still pending.
+Shared services now offers Deepgram in addition to native Twilio transcription. An administrator Deepgram key can fund live transcripts on members’ personal Twilio calls, with per-account/team audio-minute limits and a per-session deadline. Callers acknowledge their Twilio streaming charge before starting permitted transcription. Two tracks produce labelled private text and feed the opt-in AI coach; optional audio recording/playback is available: Record call in the connected call bar, then Dialer → Saved recordings. Twilio recording/storage charges apply and participant permission is required. See DEEPGRAM-SETUP.md for setup and current initial/ongoing cost estimates. Live provider and Render checks are still pending.
 
 
 ### Six-digit password recovery

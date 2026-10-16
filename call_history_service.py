@@ -36,6 +36,7 @@ def install(app,connect,user,practice,verified_form):
         try:offset=max(0,min(100000,int(request.query_params.get('offset','0'))));lid=int(lead)
         except ValueError:raise HTTPException(400,'Invalid history filter')
         where='a.user_id=?';args=[uid]
+        if request.query_params.get('recordings_only')=='1':where+=" AND EXISTS(SELECT 1 FROM call_recordings r WHERE r.attempt_id=a.id AND r.user_id=a.user_id AND r.status!='deleted')"
         if q:where+=' AND (l.name LIKE ? OR a.phone LIKE ?)';args+=['%'+q+'%','%'+q+'%']
         if lid:where+=' AND a.lead_id=?';args.append(lid)
         if result:where+=' AND EXISTS(SELECT 1 FROM call_events e WHERE e.attempt_id=a.id AND e.user_id=a.user_id AND e.ignored=0 AND e.result=?)';args.append(result)
@@ -134,4 +135,3 @@ def install(app,connect,user,practice,verified_form):
         except Exception:raise HTTPException(502,'Could not confirm deletion with Twilio')
         with connect() as db:db.execute("UPDATE call_recordings SET status='deleted' WHERE sid=? AND user_id=?",(sid,uid))
         return {'ok':True}
-
