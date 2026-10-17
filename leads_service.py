@@ -83,11 +83,18 @@ def owner_display(db,uid,lead):
     for row in rows:
         try:cells=json.loads(row['original']).get('cells',[])
         except (ValueError,TypeError):continue
-        for cell in cells:
-            header=re.sub(r'[^a-z0-9]','',str(cell.get('header','')).lower())
-            value=str(cell.get('value') or '').strip()
-            if header in ('businessowner','businessownersname','businessownername','owner','ownername','contactname','decisionmaker','decisionmakername') and value:
-                return {'owner_name_display':value[:300],'owner_name_source':'Imported spreadsheet — unverified'}
+        values={re.sub(r'[^a-z0-9]','',str(cell.get('header','')).lower()):str(cell.get('value') or '').strip() for cell in cells}
+        value=''
+        for header in ('businessowner','businessowners','businessownersname','businessownername','businessownerfullname','owner','owners','ownername','ownersname','ownerfullname','ownersfullname','businessownersfullname','nameofowner','nameoftheowner','proprietor','proprietorname'):
+            if values.get(header):value=values[header];break
+        if not value:
+            for prefix in ('businessowner','owner'):
+                first=values.get(prefix+'firstname','');last=values.get(prefix+'lastname','')
+                if first or last:value=' '.join(v for v in (first,last) if v);break
+        if not value:
+            for header in ('contactname','contactperson','primarycontact','primarycontactname','decisionmaker','decisionmakername'):
+                if values.get(header):value=values[header];break
+        if value:return {'owner_name_display':value[:300],'owner_name_source':'Imported spreadsheet — unverified'}
     return {'owner_name_display':'','owner_name_source':''}
 
 def list_for(connect, uid):

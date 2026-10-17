@@ -42,3 +42,5 @@ header h1{font-size:46px;letter-spacing:-2px}header{margin-top:27px;margin-botto
 .call-detail-dialog a{display:inline-block;margin-right:16px}.call-detail-dialog .card button{margin-top:8px}
 
 #dialNotes{min-width:220px;max-width:420px;flex:1}#dialNotes summary{cursor:pointer;color:var(--brass);padding:10px}#dialNotes textarea{width:100%;box-sizing:border-box}#dialNotes .small-note{margin:4px 0 8px}
+
+#callingOwner{margin:5px 0 8px;color:var(--brass);font-weight:600;font-size:16px}
