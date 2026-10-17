@@ -70,3 +70,13 @@ During a connected real call, the bottom call bar has Record call. Confirm parti
 Emailed tracks a lead that asked for email information; it does not send email. Choose a follow-up date/time when prompted, or leave it on hold until one is scheduled. Open Call notes in the active call bar. Notes save with the result; Save note now saves immediately to that business’s conversation notes. Notes saved with a result also appear in its call-history detail.
 
 Existing and new dispositions automatically group ordinary leads into Awaiting reply (No Answer/Voicemail), Follow-up needed (Hung Up), Emailed, Callback scheduled, Not interested, Invalid number, and Meeting booked. Manual stage moves and existing meetings/proposals/won/lost stages are preserved, as are project values. DNC leads remain excluded. Existing Contacted leads are grouped from their latest saved result when viewed, without rewriting call history.
+
+## Duplicate lists and unanswered follow-ups
+
+Imports match normalized business names/location, place IDs, and formatted phone numbers, including multiple phones in one cell. Opening a named calling list automatically removes duplicate memberships when no call is unfinished. The original business/import records and call history remain. The dialer also deduplicates the visible queue and checks waiting periods and contact blocks across matching records, preventing a duplicate record from resetting outreach.
+
+Follow-ups → No Answer follow-ups shows waiting and due unanswered contacts. Load due No Answers into dialer builds a private calling list of currently eligible contacts, without placing calls. The 24-hour wait and contact blocks are retained.
+
+History outcome and recording filters apply on change; search text applies after a short pause. Call details show whether transcription started and any saved provider error. Check Twilio for saved audio makes read-only lookups for recordings already stored against that owned call, for example when a callback was missed. It does not create recordings or transcripts.
+
+To record the remainder of an auto-dial run, check the permission-arranged option beside Record call and confirm the first recording. Remaining connected calls are then recorded until the run ends, recording is stopped, or auto-dial is stopped. Pause preserves the choice; switching lists or reloading requires renewed approval. Transcripts are separate: start Call helper and use its remaining-calls permission option. The live call bar shows Audio and Transcript status.

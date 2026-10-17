@@ -44,3 +44,5 @@ header h1{font-size:46px;letter-spacing:-2px}header{margin-top:27px;margin-botto
 #dialNotes{min-width:220px;max-width:420px;flex:1}#dialNotes summary{cursor:pointer;color:var(--brass);padding:10px}#dialNotes textarea{width:100%;box-sizing:border-box}#dialNotes .small-note{margin:4px 0 8px}
 
 #callingOwner{margin:5px 0 8px;color:var(--brass);font-weight:600;font-size:16px}
+
+.history-tools{grid-template-columns:minmax(0,2fr) minmax(150px,1fr) minmax(180px,1fr) auto}.history-tools .check-label{margin:0}.history-tools button{white-space:nowrap}#recordRemainingLabel{max-width:360px;font-size:12px}#callCaptureStatus{max-width:420px}@media(max-width:800px){.history-tools{grid-template-columns:1fr}}

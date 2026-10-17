@@ -7,7 +7,9 @@ from scoring import phone_key
 
 from dispositions import STAGES,pipeline_stage
 def now():return datetime.now(timezone.utc).isoformat()
-def contact_keys(lead):return [k for k in [('phone:'+phone_key(lead['phone'])) if phone_key(lead['phone']) else '',('place:'+lead['place_id']) if lead['place_id'] else ''] if k]
+def contact_keys(lead):
+    from lead_identity import phones
+    return ['phone:'+p for p in sorted(phones(lead['phone']))]+(['place:'+lead['place_id']] if lead['place_id'] else [])
 def blocked(db,uid,lead):return any(db.execute('SELECT 1 FROM contact_blocks WHERE user_id=? AND contact_key=?',(uid,key)).fetchone() for key in contact_keys(lead))
 def owned(db,uid,identifier):
     row=db.execute('SELECT * FROM leads WHERE id=? AND user_id=?',(identifier,uid)).fetchone()

@@ -8,10 +8,14 @@ def parsed(value):
     value=datetime.fromisoformat(value.replace('Z','+00:00'))
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
-def schedule(db,uid,lead_id,at=None):
+def schedule(db,uid,lead_id,at=None,ids=None):
     at=at or datetime.now(timezone.utc)
-    event=db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(uid,lead_id)).fetchone()
-    followups=db.execute("SELECT due_at FROM followups WHERE user_id=? AND lead_id=? AND state='open' ORDER BY due_at",(uid,lead_id)).fetchall()
+    from lead_identity import matching_ids
+    ids=ids or matching_ids(db,uid,lead_id);marks=','.join('?' for _ in ids)
+    meta=db.execute('SELECT 1 FROM lead_sales WHERE user_id=? AND lead_id IN ('+marks+") AND (do_not_contact=1 OR assigned_out=1 OR stage IN ('Won','Lost'))",[uid]+ids).fetchone()
+    if meta:return {'call_ready':False,'next_call_at':None,'schedule_reason':'Contact blocked or completed','manual_retry_allowed':False}
+    event=db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id IN ('+marks+') AND ignored=0 ORDER BY id DESC LIMIT 1',[uid]+ids).fetchone()
+    followups=db.execute("SELECT due_at FROM followups WHERE user_id=? AND lead_id IN ("+marks+") AND state='open' ORDER BY due_at",[uid]+ids).fetchall()
     result=event['result'] if event else ''
     ready=True;due=None;reason='Never called'
     if result in ('DNC','Wrong Number','Booked'):
@@ -27,7 +31,7 @@ def schedule(db,uid,lead_id,at=None):
         ready=False;reason='Review previous result'
     elif followups:
         due=min(parsed(r['due_at']) for r in followups);ready=due<=at;reason='Callback due' if ready else 'Callback scheduled'
-    return {'call_ready':ready,'next_call_at':due.isoformat() if due else None,'schedule_reason':reason,'manual_retry_allowed':result not in ('DNC','Wrong Number','Booked','Callback','Call Later','Emailed') and (result!='Not Interested' or ready)}
+    return {'effective_result':result,'call_ready':ready,'next_call_at':due.isoformat() if due else None,'schedule_reason':reason,'manual_retry_allowed':result not in ('DNC','Wrong Number','Booked','Callback','Call Later','Emailed') and (result!='Not Interested' or ready)}
 
 def apply_disposition(db,uid,lead_id,result):
     if result in ('Callback','Call Later','Emailed'):

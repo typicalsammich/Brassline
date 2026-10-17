@@ -24,6 +24,8 @@ def install(app,connect,user,practice,verified_form):
         value={k:row[k] for k in ('id','lead_id','name','phone','caller_number','started_at','answered_at','ended_at','duration_seconds','status','mode','result_recorded','lead_deleted_at','call_note')}
         event=db.execute('SELECT result FROM call_events WHERE attempt_id=? AND user_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(row['id'],row['user_id'])).fetchone()
         value['result']=event['result'] if event else None
+        value['transcription_started']=bool(row['transcription_sid'] or row['transcription_enabled'])
+        value['transcript_error']=row['transcript_error']
         value['coach_profile']=json.loads(row['coach_profile_snapshot'] or '{}').get('name','Default coach')
         value['script']=json.loads(row['script_snapshot'] or '{}').get('title','No script')
         cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat()
@@ -37,7 +39,9 @@ def install(app,connect,user,practice,verified_form):
         except ValueError:raise HTTPException(400,'Invalid history filter')
         where='a.user_id=?';args=[uid]
         if request.query_params.get('recordings_only')=='1':where+=" AND EXISTS(SELECT 1 FROM call_recordings r WHERE r.attempt_id=a.id AND r.user_id=a.user_id AND r.status!='deleted')"
-        if q:where+=' AND (l.name LIKE ? OR a.phone LIKE ?)';args+=['%'+q+'%','%'+q+'%']
+        if q:
+            digits=re.sub(r'[^0-9]','',q);phone_query=digits if len(digits)>=3 else q
+            where+=' AND (l.name LIKE ? OR a.phone LIKE ?)';args+=['%'+q+'%','%'+phone_query+'%']
         if lid:where+=' AND a.lead_id=?';args.append(lid)
         if result:where+=' AND EXISTS(SELECT 1 FROM call_events e WHERE e.attempt_id=a.id AND e.user_id=a.user_id AND e.ignored=0 AND e.result=?)';args.append(result)
         with connect() as db:
@@ -57,6 +61,31 @@ def install(app,connect,user,practice,verified_form):
         from twilio.http.http_client import TwilioHttpClient
         cfg=attempt_config(row)
         return Client(cfg['TWILIO_ACCOUNT_SID'],cfg['TWILIO_AUTH_TOKEN'],http_client=TwilioHttpClient(timeout=12)),cfg
+    @app.post('/api/call-history/{attempt_id}/refresh-media')
+    def refresh_media(attempt_id:str,request:Request):
+        uid=user(request)['id']
+        with connect() as db:row=owned(db,uid,attempt_id)
+        if row['mode']!='twilio':raise HTTPException(400,'Practice calls do not have Twilio audio')
+        call_sids={sid for sid in (row['child_sid'],row['twilio_sid']) if sid}
+        if not call_sids:return {'found':0,'note':'No provider call was connected for this attempt.'}
+        try:
+            provider,cfg=client(row);found=0;seen=set()
+            for call_sid in call_sids:
+                recordings=provider.calls(call_sid).recordings.list(limit=20)
+                for recording in recordings:
+                    if not re.fullmatch(r'RE[0-9a-fA-F]{32}',str(recording.sid)):continue
+                    if recording.call_sid not in call_sids or recording.sid in seen:continue
+                    seen.add(recording.sid)
+                    status=str(recording.status)
+                    if status not in ('completed','in-progress','processing','absent','failed'):continue
+                    try:duration=int(recording.duration) if recording.duration is not None else None
+                    except (TypeError,ValueError):duration=None
+                    with connect() as db:
+                        db.execute('INSERT INTO call_recordings(sid,attempt_id,user_id,call_sid,status,duration_seconds,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(sid) DO UPDATE SET status=excluded.status,duration_seconds=excluded.duration_seconds WHERE call_recordings.user_id=excluded.user_id AND call_recordings.attempt_id=excluded.attempt_id AND call_recordings.status!=\'deleted\'',(recording.sid,attempt_id,uid,recording.call_sid,status,duration,now()))
+                    found+=1
+        except Exception:raise HTTPException(502,'Could not check Twilio for recordings. No recording was started and no automatic retry was made.')
+        return {'found':found,'note':'Provider recordings checked. This does not record or transcribe earlier calls.'}
+
     @app.post('/api/call-history/{attempt_id}/recordings/start')
     def start_recording(attempt_id:str,data:Record,request:Request):
         uid=user(request)['id']

@@ -99,7 +99,7 @@ def install(app,connect,user,practice):
     def attempt_state(attempt_id:str,request:Request):
         with connect() as db:
             row=owned_attempt(db,user(request)['id'],attempt_id)
-            result={key:row[key] for key in ['id','status','result_recorded','auto_result','answered_seen','manual_stop']}
+            result={key:row[key] for key in ['id','status','result_recorded','auto_result','answered_seen','manual_stop','transcription_enabled','transcript_error']}
             recording=db.execute("SELECT status FROM call_recordings WHERE attempt_id=? AND user_id=? AND status!='deleted' ORDER BY created_at DESC LIMIT 1",(attempt_id,row['user_id'])).fetchone()
             result['recording_status']=recording['status'] if recording else 'off'
             return result
@@ -125,7 +125,7 @@ def install(app,connect,user,practice):
             events=[event for event in dispositions if event['source']=='dialer']
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
         with connect() as db:
-            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,COUNT(m.lead_id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id WHERE l.user_id=? GROUP BY l.id ORDER BY l.id',(uid,))]
+            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.id',(uid,))]
             if list_id and not any(l['id']==list_id for l in lists):raise HTTPException(404,'Calling list not found')
             members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
@@ -134,14 +134,18 @@ def install(app,connect,user,practice):
         config=calling_config(uid);mode='practice' if practice else 'twilio' if config['enabled'] and number_pool(config,email) else 'list'
         queue=[];histories={}
         for event in dispositions:histories.setdefault(event['lead_id'],[]).append(event)
-        for lead in list_for(connect,uid):
+        from lead_identity import groups
+        visible=list_for(connect,uid);selected=[l for l in visible if not list_id or l['id'] in members];identity=groups(selected)
+        for lead in selected:
+            if identity[lead['id']]!=lead['id']:continue
             if list_id and lead['id'] not in members:continue
+            lead['last_result']=lead.get('effective_result',lead['last_result'])
             history=histories.get(lead['id'],[]);called_today=any(as_date(e['created_at'],tz)==today for e in history)
             calls=[e for e in history if e['source']=='dialer']
             retry=bool(history and lead.get('call_ready') and lead['last_result'] in ('No Answer','Voicemail','Not Interested','Hung Up'))
             due=bool(lead.get('followup_due'));blocked=lead.get('do_not_contact') or lead.get('assigned_out') or lead.get('sales_stage') in ('Won','Lost')
             eligible=bool(not blocked and phone_key(lead['phone']) and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate')) and (lead['state']=='ready' or bool(list_id)) and lead['call_ready'])
-            if eligible or called_today or (list_id and history):
+            if eligible or called_today or (list_id and lead.get('effective_result')):
                 lead.update(manual_repeat_available=bool(not blocked and phone_key(lead['phone']) and lead['manual_retry_allowed'] and not any(lead['facts'].get(k) for k in ('permanently_closed','illegitimate'))),eligible=eligible,can_call=eligible and mode!='list',attempt_count=len(calls),done_today=called_today and not eligible,second_try=retry,latest_attempt_id=calls[-1]['attempt_id'] if calls else None)
                 queue.append(lead)
         active=None
@@ -173,6 +177,30 @@ def install(app,connect,user,practice):
         except ValueError:raise HTTPException(400,'Invalid calling list')
         return view(u['id'],u['email'],list_id)
 
+    def unanswered(uid):
+        from lead_identity import groups
+        rows=[l for l in list_for(connect,uid) if l.get('effective_result')=='No Answer' and not l.get('do_not_contact') and not l.get('assigned_out') and l.get('sales_stage') not in ('Won','Lost') and not any(l['facts'].get(k) for k in ('permanently_closed','illegitimate'))]
+        identity=groups(rows)
+        return [l for l in rows if identity[l['id']]==l['id']]
+
+    @app.get('/api/followups/no-answer')
+    def no_answer_followups(request:Request):
+        rows=unanswered(user(request)['id'])
+        return {'leads':rows,'ready':sum(bool(l['call_ready']) for l in rows)}
+
+    @app.post('/api/followups/no-answer/load')
+    def load_unanswered(request:Request):
+        uid=user(request)['id'];rows=[l for l in unanswered(uid) if l['call_ready'] and phone_key(l['phone'])]
+        if not rows:raise HTTPException(409,'No unanswered leads are due yet. The 24-hour wait and contact blocks still apply.')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call first')
+            name='No Answer follow-ups';row=db.execute('SELECT id FROM calling_lists WHERE user_id=? AND name=?',(uid,name)).fetchone()
+            lid=row['id'] if row else db.execute('INSERT INTO calling_lists(user_id,name) VALUES(?,?)',(uid,name)).lastrowid
+            db.execute('DELETE FROM calling_list_members WHERE list_id=?',(lid,))
+            db.executemany('INSERT INTO calling_list_members VALUES(?,?)',[(lid,l['id']) for l in rows])
+        return {'id':lid,'name':name,'count':len(rows)}
+
     @app.post('/api/dialer/lists')
     def save_list(data:CallingList,request:Request):
         uid=user(request)['id'];name=data.name.strip()
@@ -185,6 +213,19 @@ def install(app,connect,user,practice):
             lid=row['id'] if row else db.execute('INSERT INTO calling_lists(user_id,name) VALUES(?,?)',(uid,name)).lastrowid
             db.executemany('INSERT OR IGNORE INTO calling_list_members VALUES(?,?)',[(lid,i) for i in set(data.lead_ids)])
         return {'id':lid,'name':name}
+
+    @app.post('/api/dialer/lists/{list_id}/deduplicate')
+    def deduplicate_list(list_id:int,request:Request):
+        uid=user(request)['id']
+        from lead_identity import groups
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM calling_lists WHERE id=? AND user_id=?',(list_id,uid)).fetchone():raise HTTPException(404,'Calling list not found')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():return {'removed':0,'pending_call':True}
+            rows=db.execute('SELECT l.* FROM leads l JOIN calling_list_members m ON m.lead_id=l.id WHERE m.list_id=? AND l.user_id=? AND l.deleted_at IS NULL ORDER BY l.id',(list_id,uid)).fetchall()
+            mapping=groups(rows);duplicates=[i for i,root in mapping.items() if i!=root]
+            db.executemany('DELETE FROM calling_list_members WHERE list_id=? AND lead_id=?',[(list_id,i) for i in duplicates])
+        return {'removed':len(duplicates),'remaining':len(rows)-len(duplicates),'note':'Only duplicate list entries removed. Business records, import rows and call history retained.'}
 
     @app.post('/api/dialer/lists/{list_id}/remove')
     def remove_member(list_id:int,data:Begin,request:Request):

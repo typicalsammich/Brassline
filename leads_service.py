@@ -101,6 +101,9 @@ def list_for(connect, uid):
     with connect() as db:
         rows=db.execute('''SELECT leads.*, batches.name AS batch_name FROM leads LEFT JOIN batches ON batches.id=leads.batch_id WHERE leads.user_id=? AND leads.deleted_at IS NULL AND (NOT EXISTS (SELECT 1 FROM lead_batches WHERE lead_id=leads.id) OR EXISTS (SELECT 1 FROM lead_batches JOIN batches b ON b.id=lead_batches.batch_id WHERE lead_id=leads.id AND b.deleted_at IS NULL))''',(uid,)).fetchall()
         results=[row_dict(row) for row in rows]
+        from lead_identity import groups
+        identity=groups(db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall());identity_ids={}
+        for i,root in identity.items():identity_ids.setdefault(root,[]).append(i)
         for lead in results:
             lead.update(owner_display(db,uid,lead))
             job=db.execute('SELECT state FROM website_jobs WHERE lead_id=?',(lead['id'],)).fetchone()
@@ -115,7 +118,7 @@ def list_for(connect, uid):
             call=db.execute("SELECT created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 AND source='dialer' ORDER BY id DESC LIMIT 1",(uid,lead['id'])).fetchone()
             lead['last_call']=call['created_at'] if call else ''
             from dispositions import schedule
-            lead.update(schedule(db,uid,lead['id']))
+            lead.update(schedule(db,uid,lead['id'],ids=identity_ids.get(identity.get(lead['id']))))
             lead['batch_ids']=[r[0] for r in db.execute('SELECT batch_id FROM lead_batches JOIN batches ON batches.id=lead_batches.batch_id WHERE lead_id=? AND batches.deleted_at IS NULL',(lead['id'],))]
     return sorted(results,key=lambda lead:(not lead['priority_market'],-lead['score'],lead['id']))
 
@@ -217,6 +220,7 @@ def install(app,connect,user,practice):
         uid=user(request)['id']
         from lead_imports import parse_import
         parsed=parse_import(data);rows=parsed['leads']
+        from lead_identity import phones,business_key
         added=merged=0;warnings=list(parsed['warnings'])
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -226,8 +230,8 @@ def install(app,connect,user,practice):
             by_place={};by_phone={};by_name={}
             def remember(item):
                 if item.get('place_id'):by_place.setdefault(item['place_id'],item)
-                if phone_key(item.get('phone')):by_phone.setdefault(phone_key(item['phone']),item)
-                if name_key(item.get('name')):by_name.setdefault(name_key(item['name']),item)
+                for key in phones(item.get('phone')):by_phone.setdefault(key,item)
+                if item.get('name'):by_name.setdefault(business_key(item['name'],item.get('city','')),item)
             for item in saved:remember(item)
             for number,row in enumerate(rows,2):
                 item={field:(row.get(field) or '').strip()[:2000] for field in FIELDS}
@@ -235,8 +239,8 @@ def install(app,connect,user,practice):
                 if not item['name']:warnings.append(f'Row {number}: no business name; not imported');continue
                 item['name']=item['name'][:300]
                 existing=by_place.get(item['place_id']) if item['place_id'] else None
-                if not existing and phone_key(item['phone']):existing=by_phone.get(phone_key(item['phone']))
-                if not existing:existing=by_name.get(name_key(item['name']))
+                if not existing:existing=next((by_phone[key] for key in sorted(phones(item['phone'])) if key in by_phone),None)
+                if not existing:existing=by_name.get(business_key(item['name'],item.get('city','')))
                 if existing:
                     lead_id=existing['id'];merged+=1
                     # Preserve all verified data; only fill previously empty fields.
