@@ -80,3 +80,11 @@ Follow-ups → No Answer follow-ups shows waiting and due unanswered contacts. L
 History outcome and recording filters apply on change; search text applies after a short pause. Call details show whether transcription started and any saved provider error. Check Twilio for saved audio makes read-only lookups for recordings already stored against that owned call, for example when a callback was missed. It does not create recordings or transcripts.
 
 To record the remainder of an auto-dial run, check the permission-arranged option beside Record call and confirm the first recording. Remaining connected calls are then recorded until the run ends, recording is stopped, or auto-dial is stopped. Pause preserves the choice; switching lists or reloading requires renewed approval. Transcripts are separate: start Call helper and use its remaining-calls permission option. The live call bar shows Audio and Transcript status.
+
+## Shift time and team statuses
+
+The My shift card at the top of Dialer has Start shift, End shift, and Dialing / Break / Lunch / Technical Issues. These are self-reported clock and status records; signing in does not clock in, and closing a tab or signing out does not clock out. Elapsed time keeps running on the server until End shift. A shift left open over 16 hours is flagged for review.
+
+Changing to Break, Lunch, or Technical Issues pauses further auto-dialing in the current browser; it does not hang up the current call. Returning to Dialing does not place calls. Add a status note before choosing a status to explain issues. End the current call before ending the shift.
+
+My shift history shows private daily totals and clock-in/out/status history. Administrators use My hours / Team shifts to review the team by account and date (up to 62 days per report). All displayed/reporting dates use Eastern time, including daylight-saving changes; overnight shifts are split correctly by local date. Total shift time is broken out by status, without assuming which breaks or other time are paid. The connection timestamp shows the last browser check-in and does not automatically end a shift.

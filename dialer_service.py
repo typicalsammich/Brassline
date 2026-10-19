@@ -430,3 +430,6 @@ def install(app,connect,user,practice):
     app.state.verified_twilio_form=verified_form
     from call_history_service import install as install_history
     install_history(app,connect,user,practice,verified_form)
+
+    from shift_service import install as install_shifts
+    install_shifts(app,connect,user)
