@@ -246,6 +246,19 @@ def install(app,connect,user,practice):
             db.executemany('DELETE FROM calling_list_members WHERE list_id=? AND lead_id=?',[(list_id,i) for i in duplicates])
         return {'removed':len(duplicates),'remaining':len(rows)-len(duplicates),'note':'Only duplicate list entries removed. Business records, import rows and call history retained.'}
 
+    @app.post('/api/dialer/lists/{list_id}/delete')
+    def delete_list(list_id:int,request:Request):
+        uid=user(request)['id']
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT name FROM calling_lists WHERE id=? AND user_id=?',(list_id,uid)).fetchone()
+            if not row:raise HTTPException(404,'Calling list not found')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():
+                raise HTTPException(409,'Finish the current call and save its result before removing a calling list')
+            db.execute('DELETE FROM calling_list_members WHERE list_id=?',(list_id,))
+            db.execute('DELETE FROM calling_lists WHERE id=? AND user_id=?',(list_id,uid))
+        return {'ok':True,'name':row['name'],'message':'Calling list removed. Leads, imported batches, recordings and call history kept.'}
+
     @app.post('/api/dialer/lists/{list_id}/remove')
     def remove_member(list_id:int,data:Begin,request:Request):
         with connect() as db:
