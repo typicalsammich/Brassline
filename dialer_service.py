@@ -43,6 +43,26 @@ def choose_number(pool,phone,counters,centres=None):
     chosen=min(eligible,key=lambda n:(counters.get(n['number'],0),n['number']))
     return chosen['number'],reason
 
+def group_saved_list_days(db, uid, zone):
+    for row in db.execute('SELECT id,name,folder,created_at FROM calling_lists WHERE user_id=? AND day_grouped=0',(uid,)).fetchall():
+        folder=row['folder'];basis=''
+        if not folder and row['name'] not in ('Manual numbers','No Answer follow-ups','Scheduled callbacks'):
+            if row['created_at']:
+                try:folder=str(as_date(row['created_at'],zone));basis='List creation date'
+                except (ValueError,TypeError):pass
+            else:
+                # Older lists did not record creation time. Use a common original
+                # import day only when every member has that evidence.
+                members=db.execute('SELECT l.id,b.created_at FROM calling_list_members m JOIN leads l ON l.id=m.lead_id LEFT JOIN batches b ON b.id=l.batch_id AND b.user_id=? WHERE m.list_id=? AND l.user_id=?',(uid,row['id'],uid)).fetchall()
+                days=set()
+                try:
+                    if members and all(r['created_at'] for r in members):
+                        days={str(as_date(r['created_at'],zone)) for r in members}
+                except (ValueError,TypeError):days=set()
+                if len(days)==1:folder=days.pop();basis='Original import date (list creation date unavailable)'
+        db.execute('UPDATE calling_lists SET folder=?,day_basis=?,day_grouped=1 WHERE id=? AND user_id=?',(folder,basis,row['id'],uid))
+
+
 class Preferences(BaseModel):
     daily_goal:int=Field(ge=1,le=2000)
     timezone:str=Field(max_length=100)
@@ -80,7 +100,7 @@ def install(app,connect,user,practice):
         CREATE TABLE IF NOT EXISTS number_rotation(user_id INTEGER REFERENCES users(id),number TEXT,uses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,number));
         ''')
         list_columns={r[1] for r in db.execute('PRAGMA table_info(calling_lists)')}
-        for key,definition in [('folder',"TEXT NOT NULL DEFAULT ''"),('favorite','INTEGER NOT NULL DEFAULT 0'),('archived','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT NOT NULL DEFAULT ''")]:
+        for key,definition in [('folder',"TEXT NOT NULL DEFAULT ''"),('favorite','INTEGER NOT NULL DEFAULT 0'),('archived','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT NOT NULL DEFAULT ''"),('day_grouped','INTEGER NOT NULL DEFAULT 0'),('day_basis',"TEXT NOT NULL DEFAULT ''")]:
             if key not in list_columns:db.execute('ALTER TABLE calling_lists ADD COLUMN '+key+' '+definition)
         db.execute("CREATE TRIGGER IF NOT EXISTS calling_list_created AFTER INSERT ON calling_lists WHEN NEW.created_at='' BEGIN UPDATE calling_lists SET created_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=NEW.id; END")
         columns={r[1] for r in db.execute('PRAGMA table_info(call_events)')}
@@ -137,7 +157,8 @@ def install(app,connect,user,practice):
             events=[event for event in dispositions if event['source']=='dialer']
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
         with connect() as db:
-            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,l.folder,l.favorite,l.archived,l.created_at,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.favorite DESC,l.folder COLLATE NOCASE,l.name COLLATE NOCASE,l.id',(uid,))]
+            group_saved_list_days(db,uid,tz)
+            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,l.folder,l.favorite,l.archived,l.created_at,l.day_basis,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.favorite DESC,l.folder COLLATE NOCASE,l.name COLLATE NOCASE,l.id',(uid,))]
             # Count attempted contacts across this account, including duplicate lead rows.
             from lead_identity import contact_groups
             identity=contact_groups(db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall())
@@ -290,7 +311,7 @@ def install(app,connect,user,practice):
             owned={r[0] for r in db.execute('SELECT id FROM calling_lists WHERE user_id=?',(uid,))}
             if not ids<=owned:raise HTTPException(404,'Calling list not found')
             if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call before organizing lists')
-            db.executemany('UPDATE calling_lists SET folder=? WHERE id=? AND user_id=?',[(data.day,lid,uid) for lid in ids])
+            db.executemany("UPDATE calling_lists SET folder=?,day_grouped=1,day_basis='Chosen day' WHERE id=? AND user_id=?",[(data.day,lid,uid) for lid in ids])
         return {'ok':True,'updated':len(ids)}
 
     @app.post('/api/dialer/lists/{list_id}/organization')
@@ -302,7 +323,7 @@ def install(app,connect,user,practice):
             if not db.execute('SELECT 1 FROM calling_lists WHERE id=? AND user_id=?',(list_id,uid)).fetchone():raise HTTPException(404,'Calling list not found')
             if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call before organizing lists')
             if db.execute('SELECT 1 FROM calling_lists WHERE user_id=? AND id!=? AND lower(name)=lower(?)',(uid,list_id,name)).fetchone():raise HTTPException(409,'Another calling list already uses that name')
-            db.execute('UPDATE calling_lists SET name=?,folder=?,favorite=?,archived=? WHERE id=? AND user_id=?',(name,folder,int(data.favorite),int(data.archived),list_id,uid))
+            db.execute("UPDATE calling_lists SET day_grouped=1,day_basis='Chosen folder',name=?,folder=?,favorite=?,archived=? WHERE id=? AND user_id=?",(name,folder,int(data.favorite),int(data.archived),list_id,uid))
         return {'ok':True}
 
     @app.post('/api/dialer/lists/{list_id}/delete')
@@ -524,3 +545,4 @@ def install(app,connect,user,practice):
 
     from shift_service import install as install_shifts
     install_shifts(app,connect,user)
+
