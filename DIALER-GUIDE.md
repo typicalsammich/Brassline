@@ -88,3 +88,11 @@ The My shift card at the top of Dialer has Start shift, End shift, and Dialing /
 Changing to Break, Lunch, or Technical Issues pauses further auto-dialing in the current browser; it does not hang up the current call. Returning to Dialing does not place calls. Add a status note before choosing a status to explain issues. End the current call before ending the shift.
 
 My shift history shows private daily totals and clock-in/out/status history. Administrators use My hours / Team shifts to review the team by account and date (up to 62 days per report). All displayed/reporting dates use Eastern time, including daylight-saving changes; overnight shifts are split correctly by local date. Total shift time is broken out by status, without assuming which breaks or other time are paid. The connection timestamp shows the last browser check-in and does not automatically end a shift.
+
+## Eastern callback times and browser reminders
+
+Callback input, displayed callback dates and Due today all use America/New_York, even on a Philippines device. Eastern daylight-saving offsets are applied on the server; impossible or ambiguous clock-change times are rejected. Existing saved UTC instants are not shifted. Use Reschedule beside an open follow-up to correct an older entry; the old and new times are recorded in its timeline.
+
+Call beside a due follow-up loads that owned callback in Dialer and asks before connecting. Future times, active calls, DNC/contact blocks and other eligibility rules cannot be bypassed. This does not run the auto-dial list.
+
+Enable 10-minute computer reminders in Follow-ups to request browser permission. While Brassline is open, the browser checks upcoming callbacks and shows an approximate 10-minute notification, once per scheduled time/account across tabs. Rescheduling permits a new reminder. Notification clicks open Follow-ups and never place a call. Compatible phone browsers can use the service worker notification; mobile background suspension or a closed browser can prevent delivery. This is not closed-app push or SMS texting, and no messaging-provider charges are incurred. Disable reminders with the same Follow-ups button.

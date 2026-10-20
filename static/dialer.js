@@ -71,7 +71,7 @@ function updateKeypadState(){
 }
 function closeDialKeypad(){if($('dialKeypad')){$('dialKeypad').hidden=true;$('dialExtension').value='';$('dialKeypad').querySelector('.keypad-status').textContent='';$('toggleKeypad').setAttribute('aria-expanded','false');}updateKeypadState();}
 
-function dialScheduleText(lead){return lead.next_call_at?(lead.can_call?'Ready since: ':'Next call: ')+callDate(lead.next_call_at):lead.schedule_reason||((lead.attempt_count?'Previously called':'Never called'));}
+function dialScheduleText(lead){return lead.next_call_at?(lead.can_call?'Ready since: ':'Next call: ')+(typeof callbackTime==='function'?callbackTime(lead.next_call_at):callDate(lead.next_call_at)):lead.schedule_reason||((lead.attempt_count?'Previously called':'Never called'));}
 
 function prepareCallNotes(){
  let box=$('dialNotes');if(!box){box=el('details');box.id='dialNotes';box.append(el('summary','Call notes'));const text=el('textarea');text.id='dialCallNote';text.rows=3;text.maxLength=5000;text.placeholder='Owner name, email address, request, or anything to remember…';text.setAttribute('aria-label','Call notes');const save=action('Save note now',async()=>{const note=text.value.trim();if(!note||!dialActive)return;save.disabled=true;try{await api('crm/leads/'+dialActive.lead.id+'/notes',{text:note});text.value='';$('notice').textContent='Note saved to this business’s conversation notes.';}catch(e){$('notice').textContent=e.message;}finally{save.disabled=false;}},'secondary');box.append(text,el('p','Notes save with your chosen result, or use Save note now. Find them in Pipeline → business → Conversation notes.','small-note'),save);$('callPanel').append(box);}

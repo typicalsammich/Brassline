@@ -183,6 +183,25 @@ def install(app,connect,user,practice):
         identity=groups(rows)
         return [l for l in rows if identity[l['id']]==l['id']]
 
+    @app.post('/api/followups/{followup_id}/prepare-call')
+    def prepare_callback(followup_id:int,request:Request):
+        uid=user(request)['id']
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');followup=db.execute("SELECT * FROM followups WHERE id=? AND user_id=? AND state='open'",(followup_id,uid)).fetchone()
+            if not followup:raise HTTPException(404,'Open callback not found')
+            if datetime.fromisoformat(followup['due_at'])>datetime.now(timezone.utc):raise HTTPException(409,'This callback is scheduled for later. Reschedule it first if the requested time has changed.')
+            timing=schedule(db,uid,followup['lead_id'])
+            if not timing['call_ready']:raise HTTPException(409,timing['schedule_reason'])
+            lead=db.execute('SELECT * FROM leads WHERE id=? AND user_id=?',(followup['lead_id'],uid)).fetchone()
+            from crm_service import blocked
+            if not lead or lead['deleted_at'] or not phone_key(lead['phone']) or blocked(db,uid,lead):raise HTTPException(409,'Contact is unavailable or has no callable phone')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call first')
+            name='Scheduled callbacks';row=db.execute('SELECT id FROM calling_lists WHERE user_id=? AND name=?',(uid,name)).fetchone()
+            lid=row['id'] if row else db.execute('INSERT INTO calling_lists(user_id,name) VALUES(?,?)',(uid,name)).lastrowid
+            db.execute('DELETE FROM calling_list_members WHERE list_id=?',(lid,))
+            db.execute('INSERT OR IGNORE INTO calling_list_members VALUES(?,?)',(lid,lead['id']))
+        return {'lead_id':lead['id'],'list_id':lid,'name':lead['name']}
+
     @app.get('/api/followups/no-answer')
     def no_answer_followups(request:Request):
         rows=unanswered(user(request)['id'])

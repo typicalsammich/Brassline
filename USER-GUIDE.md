@@ -66,7 +66,7 @@ The app remains local. Render deployment, authenticated real Google scraping, re
 
 ## New follow-up and sales workflow
 
-Open a business in Leads and select Notes, follow-ups & sales. Add conversation notes, schedule callbacks, save quoted/agreed USD project values, and set a sales stage. Your notes and calls appear together in the timeline. Follow-ups shows due-now, due-today, upcoming and completed/cancelled work. Date/time entry uses your device's time zone and is stored in UTC.
+Open a business in Leads and select Notes, follow-ups & sales. Add conversation notes, schedule callbacks, save quoted/agreed USD project values, and set a sales stage. Your notes and calls appear together in the timeline. Follow-ups shows due-now, due-today, upcoming and completed/cancelled work. Callback entry and display use Eastern (New York) time regardless of device timezone, with UTC storage and daylight-saving handling. Use Call beside a due follow-up or Reschedule to correct its requested time. Enable 10-minute computer reminders in Follow-ups to receive browser notifications while Brassline is open; phone support depends on the browser and SMS is not enabled.
 
 Pipeline groups your own allowed opportunities into New, Contacted, Meeting booked, Proposal sent, Won and Lost. Values represent quotes/agreements, not received payments. Pipeline changes do not add calls or create Analytics meeting milestones.
 

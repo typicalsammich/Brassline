@@ -1,5 +1,6 @@
 import json
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from fastapi import Request,HTTPException
 from pydantic import BaseModel,Field
@@ -20,9 +21,28 @@ class Sales(BaseModel):
     quoted:Decimal|None=Field(default=None,ge=0,le=10000000,max_digits=12,decimal_places=2)
     agreed:Decimal|None=Field(default=None,ge=0,le=10000000,max_digits=12,decimal_places=2)
 class Note(BaseModel):text:str=Field(min_length=1,max_length=5000)
-class Followup(BaseModel):due_at:str=Field(max_length=60);note:str=Field(default='',max_length=2000)
+class Followup(BaseModel):
+    due_at:str=Field(default='',max_length=60)
+    local_time:str=Field(default='',max_length=40)
+    time_zone:str=Field(default='America/New_York',max_length=80)
+    note:str=Field(default='',max_length=2000)
 class Block(BaseModel):blocked:bool;reason:str=Field(default='',max_length=500)
 class Assign(BaseModel):user_id:int
+
+def callback_due(data):
+    try:
+        if data.local_time:
+            if data.time_zone!='America/New_York':raise ValueError()
+            local=datetime.fromisoformat(data.local_time)
+            if local.tzinfo is not None:raise ValueError()
+            zone=ZoneInfo('America/New_York');due=local.replace(tzinfo=zone)
+            if due.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None)!=local:raise ValueError()
+            if due.utcoffset()!=local.replace(tzinfo=zone,fold=1).utcoffset():raise ValueError()
+        else:
+            due=datetime.fromisoformat(data.due_at.replace('Z','+00:00'))
+            if due.tzinfo is None:raise ValueError()
+        return due.astimezone(timezone.utc).isoformat()
+    except ValueError:raise HTTPException(400,'Choose a valid Eastern date/time. During daylight-saving clock changes, choose an unambiguous time.')
 
 def install(app,connect,user):
     with connect() as db:
@@ -36,6 +56,7 @@ def install(app,connect,user):
         CREATE TRIGGER IF NOT EXISTS keep_lead_notes BEFORE UPDATE ON lead_notes BEGIN SELECT RAISE(ABORT,'Timeline entries cannot be overwritten'); END;''')
     with connect() as db:
         if 'stage_manual' not in {r[1] for r in db.execute('PRAGMA table_info(lead_sales)')}:db.execute('ALTER TABLE lead_sales ADD COLUMN stage_manual INTEGER NOT NULL DEFAULT 0')
+    with connect() as db:db.execute('CREATE TABLE IF NOT EXISTS callback_reminder_claims(user_id INTEGER NOT NULL,followup_id INTEGER NOT NULL,due_at TEXT NOT NULL,PRIMARY KEY(user_id,followup_id,due_at))')
     def log(db,uid,lead,text,kind='note'):db.execute('INSERT INTO lead_notes(user_id,lead_id,text,created_at,kind) VALUES(?,?,?,?,?)',(uid,lead,text,now(),kind))
     def initialize(db,uid,lead):db.execute('INSERT OR IGNORE INTO lead_sales(user_id,lead_id) VALUES(?,?)',(uid,lead))
 
@@ -80,17 +101,56 @@ def install(app,connect,user):
     @app.post('/api/crm/leads/{identifier}/followups')
     def schedule(identifier:int,data:Followup,request:Request):
         uid=user(request)['id']
-        try:
-            due=datetime.fromisoformat(data.due_at.replace('Z','+00:00'))
-            if due.tzinfo is None:raise ValueError()
-            due=due.astimezone(timezone.utc).isoformat()
-        except ValueError:raise HTTPException(400,'Choose a valid date and time with a time zone')
+        due=callback_due(data)
         with connect() as db:
             lead=owned(db,uid,identifier);initialize(db,uid,identifier)
             meta=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(uid,identifier)).fetchone()
             if meta['do_not_contact'] or meta['assigned_out'] or blocked(db,uid,lead):raise HTTPException(409,'This lead is blocked or assigned to another person')
             db.execute('INSERT INTO followups(user_id,lead_id,due_at,note,created_at) VALUES(?,?,?,?,?)',(uid,identifier,due,data.note,now()));log(db,uid,identifier,'Follow-up scheduled: '+due+(' · '+data.note if data.note else ''),'followup')
         return {'ok':True}
+
+    @app.post('/api/crm/followups/{identifier}/reschedule')
+    def reschedule(identifier:int,data:Followup,request:Request):
+        uid=user(request)['id'];due=callback_due(data)
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');row=db.execute("SELECT * FROM followups WHERE id=? AND user_id=? AND state='open'",(identifier,uid)).fetchone()
+            if not row:raise HTTPException(404,'Open follow-up not found')
+            lead=owned(db,uid,row['lead_id']);initialize(db,uid,row['lead_id'])
+            meta=db.execute('SELECT * FROM lead_sales WHERE user_id=? AND lead_id=?',(uid,row['lead_id'])).fetchone()
+            if meta['do_not_contact'] or meta['assigned_out'] or lead['deleted_at'] or blocked(db,uid,lead):raise HTTPException(409,'This contact is unavailable')
+            db.execute('UPDATE followups SET due_at=?,note=? WHERE id=?',(due,data.note,identifier));log(db,uid,row['lead_id'],'Callback rescheduled from '+row['due_at']+' to '+due,'followup')
+        return {'ok':True,'due_at':due}
+
+    def reminder_allowed(db,uid,lead_id,lead):
+        from dispositions import schedule as contact_schedule
+        timing=contact_schedule(db,uid,lead_id)
+        return not blocked(db,uid,lead) and timing.get('schedule_reason')!='Contact blocked or completed' and timing.get('effective_result') not in ('DNC','Wrong Number')
+
+    @app.get('/api/callback-reminders')
+    def reminders(request:Request):
+        uid=user(request)['id'];current=datetime.now(timezone.utc);end=(current+timedelta(minutes=10)).isoformat()
+        with connect() as db:
+            rows=db.execute("SELECT f.*,l.name,l.phone,l.place_id,l.deleted_at FROM followups f JOIN leads l ON l.id=f.lead_id AND l.user_id=f.user_id WHERE f.user_id=? AND f.state='open' AND f.due_at>? AND f.due_at<=? AND l.deleted_at IS NULL",(uid,current.isoformat(),end)).fetchall()
+            return {'followups':[dict(r) for r in rows if reminder_allowed(db,uid,r['lead_id'],r)]}
+
+    @app.post('/api/crm/followups/{identifier}/reminder')
+    def claim_reminder(identifier:int,request:Request):
+        uid=user(request)['id'];current=datetime.now(timezone.utc)
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE');row=db.execute("SELECT * FROM followups WHERE id=? AND user_id=? AND state='open'",(identifier,uid)).fetchone()
+            if not row:raise HTTPException(404,'Follow-up not found')
+            due=datetime.fromisoformat(row['due_at'])
+            if not 0<(due-current).total_seconds()<=600:raise HTTPException(409,'Reminder is not due')
+            lead=owned(db,uid,row['lead_id'])
+            if lead['deleted_at'] or not reminder_allowed(db,uid,row['lead_id'],lead):raise HTTPException(409,'Contact unavailable')
+            inserted=db.execute('INSERT OR IGNORE INTO callback_reminder_claims(user_id,followup_id,due_at) VALUES(?,?,?)',(uid,identifier,row['due_at'])).rowcount
+        return {'notify':bool(inserted)}
+
+    @app.get('/callback-reminder-sw.js')
+    def reminder_worker():
+        from fastapi.responses import FileResponse
+        from pathlib import Path
+        return FileResponse(Path(__file__).parent/'static'/'callback-reminder-sw.js',media_type='application/javascript',headers={'Cache-Control':'no-cache'})
 
     @app.post('/api/crm/followups/{identifier}/{state}')
     def finish(identifier:int,state:str,request:Request):

@@ -1,0 +1,1 @@
+self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil((async()=>{const tabs=await self.clients.matchAll({type:'window',includeUncontrolled:true});for(const tab of tabs){if(new URL(tab.url).origin===self.location.origin){await tab.focus();tab.postMessage({type:'callback-reminder'});return;}}await self.clients.openWindow('/');})());});
