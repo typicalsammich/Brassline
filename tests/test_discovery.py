@@ -33,6 +33,16 @@ assert c.get('/api/discovery').status_code==200
 assert not c.get('/api/discovery').json()['config']['paid_enabled']
 assert other.post('/api/discovery/settings',json={**DEFAULTS,'paid_enabled':True,'daily_budget_cents':100,'monthly_budget_cents':2000,'search_ceiling_cents':5}).status_code==403
 assert c.post('/api/discovery/wake').status_code==403
+# Start enables the saved configuration without granting paid search.
+assert c.get('/api/discovery').json()['runtime']['label']=='Paused'
+assert c.post('/api/discovery/start').status_code==200
+started=c.get('/api/discovery').json()
+assert started['config']['enabled'] and not started['config']['paid_enabled']
+assert started['runtime']['pending']>0 and 'Queued' in started['runtime']['label']
+assert not other.get('/api/discovery').json()['config']['enabled']
+assert c.post('/api/discovery/pause').status_code==200
+with m.connect() as db:
+ db.execute('DELETE FROM discovery_jobs')
 settings={**DEFAULTS,'enabled':True,'sources':['nyc_licenses'],'industries':['ROOF'],'raw_daily_limit':2}
 assert c.post('/api/discovery/settings',json=settings).status_code==200
 assert c.post('/api/discovery/start').status_code==200

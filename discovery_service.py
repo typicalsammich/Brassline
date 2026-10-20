@@ -34,6 +34,23 @@ def cfg_in(db, uid):
     return {**DEFAULTS, **(json.loads(row[0]) if row else {})}
 
 
+def runtime_in(db, uid, practice=False):
+    cfg = cfg_in(db, uid)
+    now = time.time()
+    counts = {r['state']: r['n'] for r in db.execute("SELECT state,count(*) AS n FROM discovery_jobs WHERE user_id=? GROUP BY state", (uid,))}
+    active = db.execute("SELECT count(*) FROM discovery_jobs WHERE user_id=? AND state='running' AND lease_until>?", (uid,now)).fetchone()[0]
+    today = db.execute("SELECT count(*) FROM discovery_records WHERE user_id=? AND created_at LIKE ?", (uid,stamp()[:10]+'%')).fetchone()[0]
+    pending = sum(counts.get(k,0) for k in ('queued','retry','running'))
+    if practice: label = 'Disabled in practice'
+    elif not cfg['enabled']: label = 'Paused'
+    elif active: label = 'Running  -  fetching / researching'
+    elif pending: label = 'Queued / waiting to retry'
+    elif today >= cfg['raw_daily_limit']: label = 'Daily record limit reached  -  waiting for next UTC day'
+    elif counts.get('failed'): label = 'Needs attention  -  see job errors below'
+    else: label = 'Enabled  -  waiting for next daily run'
+    return {'label':label,'active':active,'pending':pending,'completed':counts.get('complete',0),'failed':counts.get('failed',0),'discovered_today':today,'daily_limit':cfg['raw_daily_limit']}
+
+
 def profile_for(db, uid, lid):
     row = db.execute('SELECT profile FROM discovery_records WHERE user_id=? AND lead_id=? ORDER BY updated_at DESC,id DESC LIMIT 1', (uid, lid)).fetchone()
     cfg=cfg_in(db,uid)
@@ -373,6 +390,7 @@ def install(app, connect, user, practice):
         uid = account['id']
         with connect() as db:
             cfg = cfg_in(db, uid)
+            runtime = runtime_in(db, uid, practice)
             records = db.execute('SELECT * FROM discovery_records WHERE user_id=? ORDER BY updated_at DESC,id DESC LIMIT 100', (uid,)).fetchall()
             profiles = [{**owners.summarize(json.loads(r['profile']), cfg['minimum_confidence'], cfg['require_phone']), 'id': r['id'], 'lead_id': r['lead_id']} for r in records]
             jobs = [dict(r) for r in db.execute('SELECT id,kind,state,attempts,message,updated_at FROM discovery_jobs WHERE user_id=? ORDER BY id DESC LIMIT 20', (uid,))]
@@ -388,7 +406,7 @@ def install(app, connect, user, practice):
                 SUM(json_extract(profile,'$.verification_summary.person_status') IN ('verified_owner','verified_decision_maker')) AS owner_verified,
                 SUM(json_extract(profile,'$.verification_summary.qualified')=1) AS owner_phone_qualified
                 FROM discovery_records WHERE user_id=? AND created_at LIKE ?""",(uid,stamp()[:7]+'%')).fetchone()
-        return {'config': cfg, 'admin': bool(account.get('admin')), 'sources': [s.public() for s in sources.SOURCES.values()],
+        return {'config': cfg, 'runtime': runtime, 'admin': bool(account.get('admin')), 'sources': [s.public() for s in sources.SOURCES.values()],
                 'pending_sources': sources.PENDING, 'records': profiles, 'total': total, 'jobs': jobs, 'source_health': health,
                 'spend': spend, 'source_yield':yields,'monthly_cohort':dict(monthly),'practice': practice, 'scheduler': 'Same web process with durable leases; external authenticated wake recommended.',
                 'limits': '100 is a target, not a promised yield. Published phone evidence does not test carrier connectivity. Paid costs are reserved ceilings until reconciled.'}
@@ -468,10 +486,14 @@ def install(app, connect, user, practice):
         if practice:
             raise HTTPException(400, 'Government and paid discovery are disabled in practice')
         with connect() as db:
-            if not cfg_in(db, uid)['enabled']:
-                raise HTTPException(409, 'Save settings with discovery enabled first')
+            db.execute('BEGIN IMMEDIATE')
+            cfg = cfg_in(db, uid)
+            if not cfg['industries'] or not any(key in sources.SOURCES and sources.SOURCES[key].state in cfg['states'] for key in cfg['sources']):
+                raise HTTPException(400, 'Save at least one supported source, its state, and industry terms before starting')
+            cfg['enabled'] = True
+            db.execute('INSERT INTO discovery_settings VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET config=excluded.config', (uid, json.dumps(cfg)))
         schedule(uid, True)
-        return {'ok': True, 'message': 'Daily jobs queued. No calls will be placed.'}
+        return {'ok': True, 'message': 'Discovery enabled using your saved settings. Progress updates automatically below. No calls will be placed.'}
 
     @app.post('/api/discovery/pause')
     def pause(request: Request):
