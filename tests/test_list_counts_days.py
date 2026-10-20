@@ -13,6 +13,7 @@ assert c.post('/api/dialer/lists/group-day',json={'list_ids':[one,two],'day':'20
 assert c.post('/api/dialer/lists/group-day',json={'list_ids':[one,two],'day':'2026-10-20'}).status_code==200
 folder=next(f for f in c.get('/api/dialer').json()['folders'] if f['folder']=='2026-10-20' and f['state']=='active')
 assert folder['lists']==2 and folder['count']==1 and folder['uncalled']==1
+assert folder['lead_count']==2 and folder['uncalled_entries']==2
 with m.connect() as db:db.execute("INSERT INTO call_events(user_id,lead_id,result,source) VALUES(1,?,'No Answer','manual')",(lead,))
 assert item(one)['uncalled']==0 and item(two)['uncalled']==0
 assert next(f for f in c.get('/api/dialer').json()['folders'] if f['folder']=='2026-10-20' and f['state']=='active')['uncalled']==0

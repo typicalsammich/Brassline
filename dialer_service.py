@@ -175,10 +175,10 @@ def install(app,connect,user,practice):
                 grouped={}
                 for item in lists:
                     if state!='all' and bool(item['archived'])!=(state=='archived'):continue
-                    entry=grouped.setdefault(item['folder'],{'contacts':set(),'lists':0})
-                    entry['contacts'].update(memberships.get(item['id'],set()));entry['lists']+=1
+                    entry=grouped.setdefault(item['folder'],{'contacts':set(),'lists':0,'lead_count':0,'uncalled_entries':0})
+                    entry['contacts'].update(memberships.get(item['id'],set()));entry['lists']+=1;entry['lead_count']+=item['count'];entry['uncalled_entries']+=item['uncalled']
                 for folder,entry in grouped.items():
-                    folder_stats.append({'folder':folder,'state':state,'lists':entry['lists'],'count':len(entry['contacts']),'uncalled':len(entry['contacts']-attempted)})
+                    folder_stats.append({'folder':folder,'state':state,'lists':entry['lists'],'count':len(entry['contacts']),'uncalled':len(entry['contacts']-attempted),'lead_count':entry['lead_count'],'uncalled_entries':entry['uncalled_entries']})
             if list_id and not any(l['id']==list_id and not l['archived'] for l in lists):raise HTTPException(404,'Calling list unavailable; restore archived lists in Manage calling lists')
             members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
