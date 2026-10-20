@@ -1,4 +1,6 @@
-"""Conservative contact matching shared by imports and calling lists."""
+"""Business identity matching. Shared phone alone is not a shared business.
+Phone-based contact suppression remains separately enforced by crm_service.
+"""
 import re,unicodedata
 from scoring import phone_key
 
@@ -18,10 +20,12 @@ def business_key(name,city=''):
     return ' '.join(parts)+'|'+re.sub(r'[^a-z0-9]','',str(city or '').casefold()) if parts else ''
 
 def keys(row):
-    result={'phone:'+p for p in phones(row['phone'])}
+    base=business_key(row['name']).split('|')[0]
+    locality=re.sub(r'[^a-z0-9]','',str(row['city'] or '').casefold())
+    result={'business-phone:'+base+':'+locality+':'+p for p in phones(row['phone'])} if base else set()
     if row['place_id']:result.add('place:'+row['place_id'])
     name=business_key(row['name'],row['city'])
-    if name:result.add('name:'+name)
+    if name and row['city']:result.add('name:'+name)
     return result
 
 def groups(rows):
@@ -38,5 +42,18 @@ def groups(rows):
 
 def matching_ids(db,uid,lid):
     rows=db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall()
-    mapping=groups(rows);root=mapping.get(lid,lid)
+    mapping=contact_groups(rows);root=mapping.get(lid,lid)
     return [i for i,r in mapping.items() if r==root] or [lid]
+
+def contact_groups(rows):
+    """Only for outreach waits/suppression, never business merging or list deletion."""
+    mapping=groups(rows);parent={i:i for i in mapping};seen={}
+    def root(i):
+        while parent[i]!=i:parent[i]=parent[parent[i]];i=parent[i]
+        return i
+    for row in rows:
+        for key in ['business:'+str(mapping[row['id']]),*('phone:'+p for p in phones(row['phone']))]:
+            if key in seen:
+                a,b=root(row['id']),root(seen[key]);parent[max(a,b)]=min(a,b)
+            else:seen[key]=row['id']
+    return {i:root(i) for i in parent}

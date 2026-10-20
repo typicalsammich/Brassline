@@ -101,11 +101,18 @@ def list_for(connect, uid):
     with connect() as db:
         rows=db.execute('''SELECT leads.*, batches.name AS batch_name FROM leads LEFT JOIN batches ON batches.id=leads.batch_id WHERE leads.user_id=? AND leads.deleted_at IS NULL AND (NOT EXISTS (SELECT 1 FROM lead_batches WHERE lead_id=leads.id) OR EXISTS (SELECT 1 FROM lead_batches JOIN batches b ON b.id=lead_batches.batch_id WHERE lead_id=leads.id AND b.deleted_at IS NULL))''',(uid,)).fetchall()
         results=[row_dict(row) for row in rows]
-        from lead_identity import groups
-        identity=groups(db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall());identity_ids={}
+        from lead_identity import contact_groups
+        identity=contact_groups(db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall());identity_ids={}
         for i,root in identity.items():identity_ids.setdefault(root,[]).append(i)
         for lead in results:
             lead.update(owner_display(db,uid,lead))
+            from discovery_service import profile_for
+            lead['discovery']=profile_for(db,uid,lead['id'])
+            if lead['discovery']:
+                person=lead['discovery'].get('best_person')
+                if person and person['status'] in ('verified_owner','verified_decision_maker'):
+                    lead.update(owner_name_display=person['name'],owner_name_source=person['role']+' · '+person['status'].replace('_',' '))
+                if not lead['discovery']['qualified']:lead['state']='waiting'
             job=db.execute('SELECT state FROM website_jobs WHERE lead_id=?',(lead['id'],)).fetchone()
             lead['website_check_state']=job['state'] if job else ('complete' if lead['website_check'] else 'not_checked')
             event=db.execute('SELECT result,created_at FROM call_events WHERE user_id=? AND lead_id=? AND ignored=0 ORDER BY id DESC LIMIT 1',(uid,lead['id'])).fetchone()
@@ -230,7 +237,7 @@ def install(app,connect,user,practice):
             by_place={};by_phone={};by_name={}
             def remember(item):
                 if item.get('place_id'):by_place.setdefault(item['place_id'],item)
-                for key in phones(item.get('phone')):by_phone.setdefault(key,item)
+                for key in phones(item.get('phone')):by_phone.setdefault((key,business_key(item['name']).split('|')[0]),item)
                 if item.get('name'):by_name.setdefault(business_key(item['name'],item.get('city','')),item)
             for item in saved:remember(item)
             for number,row in enumerate(rows,2):
@@ -239,8 +246,8 @@ def install(app,connect,user,practice):
                 if not item['name']:warnings.append(f'Row {number}: no business name; not imported');continue
                 item['name']=item['name'][:300]
                 existing=by_place.get(item['place_id']) if item['place_id'] else None
-                if not existing:existing=next((by_phone[key] for key in sorted(phones(item['phone'])) if key in by_phone),None)
-                if not existing:existing=by_name.get(business_key(item['name'],item.get('city','')))
+                if not existing:existing=next((by_phone[(key,business_key(item['name']).split('|')[0])] for key in sorted(phones(item['phone'])) if (key,business_key(item['name']).split('|')[0]) in by_phone),None)
+                if not existing and item.get('city'):existing=by_name.get(business_key(item['name'],item.get('city','')))
                 if existing:
                     lead_id=existing['id'];merged+=1
                     # Preserve all verified data; only fill previously empty fields.
@@ -289,6 +296,9 @@ def install(app,connect,user,practice):
         with connect() as db:
             lead=row_dict(owned(db,uid,lead_id))
             lead.update(owner_display(db,uid,lead))
+            from discovery_service import profile_for
+            lead['discovery']=profile_for(db,uid,lead['id'])
+            if lead['discovery'] and not lead['discovery']['qualified']:lead['state']='waiting'
             lead['imported_rows']=[{**dict(r),'original':json.loads(r['original'])} for r in db.execute('SELECT r.original,r.batch_id,f.filename FROM lead_import_records r JOIN lead_import_files f ON f.batch_id=r.batch_id WHERE r.user_id=? AND r.lead_id=? ORDER BY r.id',(uid,lead_id))]
             lead['events']=[dict(r) for r in db.execute('SELECT * FROM call_events WHERE user_id=? AND lead_id=? ORDER BY id DESC',(uid,lead_id))]
             return lead
@@ -328,3 +338,4 @@ def install(app,connect,user,practice):
             from dispositions import apply_disposition
             apply_disposition(db,uid,lead_id,data.result)
         return {'ok':True,'note':'Bookkeeping saved. This does not count as a dial.'}
+

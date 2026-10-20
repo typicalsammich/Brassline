@@ -112,7 +112,9 @@ def inspect_pages(home, extra_pages=()):
             for obj in objects(doc):
                 kinds=obj.get('@type',[]);kinds=kinds if isinstance(kinds,list) else [kinds]
                 if 'Person' in kinds and obj.get('name') and any(word in str(obj.get('jobTitle','')).lower() for word in ('owner','president','manager','ceo','founder')):
-                    report['decision_makers'].append({'name':str(obj['name'])[:160],'role':str(obj.get('jobTitle',''))[:160],'phone':str(obj.get('telephone',''))[:80] if phone_key(obj.get('telephone')) else '', 'source':url,'verification':'Website-published role; current authority needs confirmation'})
+                    organization=obj.get('worksFor') or obj.get('memberOf') or {}
+                    organization=organization.get('name','') if isinstance(organization,dict) else ''
+                    report['decision_makers'].append({'name':str(obj['name'])[:160],'role':str(obj.get('jobTitle',''))[:160],'phone':str(obj.get('telephone',''))[:80] if phone_key(obj.get('telephone')) else '', 'organization_name':str(organization)[:300],'source':url,'verification':'Website-published role; current authority needs confirmation'})
                 if obj.get('founder'):
                     founders=obj['founder'] if isinstance(obj['founder'],list) else [obj['founder']]
                     for founder in founders:
@@ -128,7 +130,7 @@ def inspect_pages(home, extra_pages=()):
     if not report['findings']:report['findings'].append({'kind':'unknown','text':'No obvious issue found by the light HTML check. This does not establish that the site is functional or mobile-friendly.','source':home['url']})
     return report,parsed
 
-def check_website(url):
+def check_website(url,business=None):
     home=fetch_public(url)
     first,parsed=inspect_pages(home)
     extra=[]
@@ -143,5 +145,14 @@ def check_website(url):
         for target in candidates[:settings()['website_checks']['max_pages']-1]:
             try:extra.append(fetch_public(target))
             except (SiteError,OSError,http.client.HTTPException) as error:first['limitations'].append('Could not check '+target+': '+str(error))
-    report,_=inspect_pages(home,extra);report['limitations']=first['limitations']
+    report,parsed=inspect_pages(home,extra);report['limitations']=first['limitations']
+    if business:
+        from lead_identity import business_key
+        name=business_key(business.get('name','')).split('|')[0]
+        text=' '.join(' '.join(p.text) for _,p in parsed)
+        normalized=business_key(text).split('|')[0]
+        phone=phone_key(business.get('phone',''))
+        phone_matches=bool(phone and any(phone_key(c.get('value'))==phone for c in report['contacts'] if c['type']=='business_phone'))
+        report['company_identity_confirmed']=bool(len(name.split())>=2 and name in normalized and phone_matches)
+        report['identity_evidence']='Exact normalized company name and matching published business telephone on supplied website.' if report['company_identity_confirmed'] else 'Company identity remains unconfirmed.'
     return report

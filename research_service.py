@@ -61,6 +61,10 @@ def search_web(cfg,query,limit=5,maps=False):
         data=result.get('data',{});rows=data.get('web',[]) if isinstance(data,dict) else data
         return [{'name':r.get('title',''),'url':r.get('url',''),'snippet':r.get('description',''),'website':''} for r in rows[:limit]]
     raise HTTPException(503,'The administrator has not connected a research provider')
+def canonical_name(name):
+    from lead_identity import business_key
+    return business_key(name).split('|')[0]
+
 def canonical(url):
     try:
         parsed=urlsplit(url)
@@ -205,7 +209,7 @@ def install(app,connect,user,practice):
             batch=db.execute('INSERT INTO batches(user_id,name) VALUES(?,?)',(uid,'Research · '+run[:8])).lastrowid;added=0;duplicates=0
             for index in indices:
                 item=report[index];existing=db.execute('SELECT id,name,phone,place_id,source_url FROM leads WHERE user_id=?',(uid,)).fetchall()
-                duplicate=any((item.get('place_id') and r['place_id']==item['place_id']) or (phone_key(item['phone']) and phone_key(r['phone'])==phone_key(item['phone'])) or canonical(r['source_url'])==canonical(item['source_url']) or re.sub(r'\W','',r['name'].lower())==re.sub(r'\W','',item['name'].lower()) for r in existing)
+                duplicate=any((item.get('place_id') and r['place_id']==item['place_id']) or (phone_key(item['phone']) and phone_key(r['phone'])==phone_key(item['phone']) and canonical_name(r['name'])==canonical_name(item['name'])) or (canonical(r['source_url']) and canonical(r['source_url'])==canonical(item['source_url']) and canonical_name(r['name'])==canonical_name(item['name'])) for r in existing)
                 if duplicate:duplicates+=1;continue
                 fields=['name','phone','email','category','city','place_id','website_url','social_url','source_url']
                 lid=db.execute('INSERT INTO leads(user_id,batch_id,'+','.join(fields)+',facts,website_check,review_facts) VALUES('+','.join('?' for _ in range(14))+')',[uid,batch]+[item.get(k,'') for k in fields]+[json.dumps(item['facts']),json.dumps(item['website_check']),json.dumps(item['review_facts'])]).lastrowid
@@ -213,3 +217,5 @@ def install(app,connect,user,practice):
             if not added:db.execute('DELETE FROM batches WHERE id=?',(batch,))
         return {'ok':True,'added':added,'duplicates':duplicates}
     app.state.research_work=work
+    from discovery_service import install as install_discovery
+    install_discovery(app,connect,user,practice)

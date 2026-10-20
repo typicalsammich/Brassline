@@ -178,9 +178,9 @@ def install(app,connect,user,practice):
         return view(u['id'],u['email'],list_id)
 
     def unanswered(uid):
-        from lead_identity import groups
+        from lead_identity import contact_groups
         rows=[l for l in list_for(connect,uid) if l.get('effective_result')=='No Answer' and not l.get('do_not_contact') and not l.get('assigned_out') and l.get('sales_stage') not in ('Won','Lost') and not any(l['facts'].get(k) for k in ('permanently_closed','illegitimate'))]
-        identity=groups(rows)
+        identity=contact_groups(rows)
         return [l for l in rows if identity[l['id']]==l['id']]
 
     @app.post('/api/followups/{followup_id}/prepare-call')

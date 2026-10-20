@@ -80,4 +80,8 @@ Research and Shared services are now available. The administrator can configure 
 
 ## Separate Deepgram transcription funding
 
-Shared services now offers Deepgram in addition to native Twilio transcription. An administrator Deepgram key can fund live transcripts on members’ personal Twilio calls, with per-account/team audio-minute limits and a per-session deadline. Callers acknowledge their Twilio streaming charge before starting permitted transcription. Two tracks produce labelled private text and feed the opt-in AI coach; audio recordings/playback are not implemented. See DEEPGRAM-SETUP.md for setup and current initial/ongoing cost estimates. Live provider and Render checks are still pending.
+Shared services now offers Deepgram in addition to native Twilio transcription. An administrator Deepgram key can fund live transcripts on members’ personal Twilio calls, with per-account/team audio-minute limits and a per-session deadline. Callers acknowledge their Twilio streaming charge before starting permitted transcription. Two tracks produce labelled private text and feed the opt-in AI coach; audio recordings/playback are a separate opt-in Twilio feature in Call history. See DEEPGRAM-SETUP.md for setup and current initial/ongoing cost estimates. Live provider and Render checks are still pending.
+
+## Owner-aware automatic discovery
+
+See [DISCOVERY-GUIDE.md](DISCOVERY-GUIDE.md) for the default-off government-data pilot, evidence review, spending caps, initial NY/CO source coverage, limitations and HTTP-only scheduling on Render. Discovery never automatically calls a lead.

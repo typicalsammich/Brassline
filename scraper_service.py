@@ -86,7 +86,9 @@ def install(app,connect,user,practice):
             existing=db.execute('SELECT * FROM leads WHERE user_id=? AND place_id=?',(uid,data.place_id)).fetchone() if data.place_id else None
             if not existing:
                 candidates=db.execute('SELECT id,name,phone FROM leads WHERE user_id=?',(uid,)).fetchall()
-                if phone_key(data.phone):existing=next((r for r in candidates if phone_key(r['phone'])==phone_key(data.phone)),None)
+                if phone_key(data.phone):
+                    from lead_identity import business_key
+                    existing=next((r for r in candidates if phone_key(r['phone'])==phone_key(data.phone) and business_key(r['name']).split('|')[0]==business_key(data.name).split('|')[0]),None)
                 if not existing:existing=next((r for r in candidates if name_key(r['name'])==name_key(data.name)),None)
             if existing:lead_id=existing['id'];new=False
             else:
