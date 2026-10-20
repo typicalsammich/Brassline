@@ -84,4 +84,4 @@ Shared services now offers Deepgram in addition to native Twilio transcription. 
 
 ## Owner-aware automatic discovery
 
-See [DISCOVERY-GUIDE.md](DISCOVERY-GUIDE.md) for the default-off government-data pilot, evidence review, spending caps, initial NY/CO source coverage, limitations and HTTP-only scheduling on Render. Discovery never automatically calls a lead.
+See [DISCOVERY-GUIDE.md](DISCOVERY-GUIDE.md) for the default-off government-data pilot, evidence review, spending caps, initial CA/FL/NY/CO source coverage, limitations and HTTP-only scheduling on Render. Discovery never automatically calls a lead.

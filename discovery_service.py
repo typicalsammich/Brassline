@@ -21,7 +21,7 @@ import owner_verification as owners
 DEFAULTS = {'enabled': False, 'daily_target': 100, 'raw_daily_limit': 300,
             'monthly_budget_cents': 0, 'daily_budget_cents': 0, 'paid_enabled': False,
             'search_ceiling_cents': 0, 'industries': ['PLUMB', 'ROOF', 'ELECTRIC', 'HVAC'],
-            'states': ['CO', 'NY'], 'sources': ['co_entities', 'ny_entities', 'nyc_licenses'],
+            'states': ['CO', 'NY', 'CA', 'FL'], 'sources': ['ca_cslb', 'fl_dbpr_construction', 'co_entities', 'ny_entities', 'nyc_licenses'],
             'minimum_confidence': 80, 'require_phone': True}
 
 
@@ -49,7 +49,7 @@ class Configuration(BaseModel):
     paid_enabled: bool = False
     search_ceiling_cents: int = Field(default=0, ge=0, le=1000)
     industries: list[str] = Field(default_factory=lambda: list(DEFAULTS['industries']), max_length=20)
-    states: list[str] = Field(default_factory=lambda: ['CO', 'NY'], max_length=51)
+    states: list[str] = Field(default_factory=lambda: list(DEFAULTS['states']), max_length=51)
     sources: list[str] = Field(default_factory=lambda: list(DEFAULTS['sources']), max_length=10)
     minimum_confidence: int = Field(default=80, ge=50, le=100)
     require_phone: bool = True
@@ -89,6 +89,9 @@ class CostReceipt(BaseModel):
 
 def install(app, connect, user, practice):
     with connect() as db:
+        from discovery_bulk_sources import configure as configure_bulk
+        from pathlib import Path
+        configure_bulk(Path(db.execute('PRAGMA database_list').fetchone()['file']).parent)
         db.executescript('''
         CREATE TABLE IF NOT EXISTS discovery_settings(user_id INTEGER PRIMARY KEY,config TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS discovery_sources(user_id INTEGER,source TEXT,cursor TEXT NOT NULL DEFAULT '',
@@ -148,7 +151,9 @@ def install(app, connect, user, practice):
             if not row:
                 return None
             lease = secrets.token_urlsafe(18)
-            db.execute("UPDATE discovery_jobs SET state='running',lease=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE id=?", (lease, now + 180, now, row['id']))
+            source_key=json.loads(row['payload']).get('source') if row['kind']=='source' else None
+            seconds=900 if source_key in sources.SOURCES and sources.SOURCES[source_key].kind=='bulk' else 180
+            db.execute("UPDATE discovery_jobs SET state='running',lease=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE id=?", (lease, now + seconds, now, row['id']))
             return {**dict(row), 'lease': lease, 'attempts': row['attempts'] + 1}
 
     def fenced(db, job):
@@ -159,6 +164,8 @@ def install(app, connect, user, practice):
         uid, key = job['user_id'], payload['source']
         with connect() as db:
             cfg = cfg_in(db, uid)
+            if key not in cfg['sources'] or sources.SOURCES[key].state not in cfg['states']:
+                return
             retained=db.execute('SELECT count(*) FROM discovery_records WHERE user_id=?',(uid,)).fetchone()[0]
             if retained>=10000:
                 raise ValueError('Discovery retention ceiling reached; review/archive records before continuing')
@@ -168,11 +175,21 @@ def install(app, connect, user, practice):
             qualified = db.execute("SELECT count(*) FROM discovery_records WHERE user_id=? AND json_extract(profile,'$.qualified_at') LIKE ? AND json_extract(profile,'$.verification_summary.qualified')=1", (uid, payload['day']+'%')).fetchone()[0]
             if count >= cfg['raw_daily_limit'] or qualified >= cfg['daily_target']:
                 return
+        if sources.SOURCES[key].kind=='bulk':
+            with connect() as db:
+                db.execute('UPDATE discovery_jobs SET message=? WHERE id=? AND lease=?',('Preparing official bulk snapshot. First refresh can take several minutes; later pages use the local cache.',job['id'],job['lease']))
         meta = sources.schema(sources.SOURCES[key])
-        rows, next_cursor, exhausted = sources.fetch_page(key, cursor, min(100, cfg['raw_daily_limit'] - count), cfg['industries'])
+        active_sources=[s for s in cfg['sources'] if sources.SOURCES[s].state in cfg['states']]
+        page_size=max(1,min(100,cfg['raw_daily_limit']//max(1,len(active_sources))))
+        rows, next_cursor, exhausted = sources.fetch_page(key, cursor, min(page_size, cfg['raw_daily_limit'] - count), cfg['industries'])
+        if sources.SOURCES[key].kind=='bulk':
+            meta=sources.schema(sources.SOURCES[key])
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not fenced(db, job):
+                return
+            latest_cfg=cfg_in(db,uid)
+            if key not in latest_cfg['sources'] or sources.SOURCES[key].state not in latest_cfg['states'] or latest_cfg['industries']!=cfg['industries']:
                 return
             for raw in rows:
                 profile = sources.normalize(key, raw, stamp())
@@ -190,7 +207,7 @@ def install(app, connect, user, practice):
                     rid = old['id']
                 else:
                     profile['phone_evidence'] = {'source_url': profile['source_url'], 'retrieved_at': profile['retrieved_at'],
-                                                 'published_business': bool(profile['phone']), 'evidence': 'Official licensing contact_phone field' if profile['phone'] else ''}
+                                                 'published_business': bool(profile['phone']), 'evidence': profile.get('phone_evidence_text') or ('Official licensing contact_phone field' if profile['phone'] else '')}
                     profile['people'] = [{**p, 'retrieved_at': profile['retrieved_at']} for p in profile['people']]
                     rid = db.execute('INSERT INTO discovery_records(user_id,source,source_id,fingerprint,profile,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
                                      (uid, key, profile['source_id'], profile['fingerprint'], json.dumps(profile), stamp(), stamp())).lastrowid
@@ -199,7 +216,7 @@ def install(app, connect, user, practice):
                        (uid, key, '' if exhausted else next_cursor, json.dumps(meta), time.time()))
             # Page at most once per minute. Daily scans are bounded even with mostly unchanged data.
             page_number = payload.get('page', 0)
-            if not exhausted and page_number + 1 < (cfg['raw_daily_limit'] + 99) // 100:
+            if not exhausted and page_number + 1 < (cfg['raw_daily_limit'] + page_size - 1) // page_size:
                 next_key = f'{uid}:{payload["day"]}:{key}:page:{page_number + 1}'
                 enqueue(db, uid, 'source', next_key, {**payload, 'page': page_number + 1})
                 db.execute('UPDATE discovery_jobs SET available_at=? WHERE job_key=?', (time.time() + 60, next_key))
@@ -359,7 +376,7 @@ def install(app, connect, user, practice):
             records = db.execute('SELECT * FROM discovery_records WHERE user_id=? ORDER BY updated_at DESC,id DESC LIMIT 100', (uid,)).fetchall()
             profiles = [{**owners.summarize(json.loads(r['profile']), cfg['minimum_confidence'], cfg['require_phone']), 'id': r['id'], 'lead_id': r['lead_id']} for r in records]
             jobs = [dict(r) for r in db.execute('SELECT id,kind,state,attempts,message,updated_at FROM discovery_jobs WHERE user_id=? ORDER BY id DESC LIMIT 20', (uid,))]
-            health = [dict(r) for r in db.execute('SELECT source,last_success,last_error FROM discovery_sources WHERE user_id=?', (uid,))]
+            health = [{**dict(r),'metadata':json.loads(r['metadata'])} for r in db.execute('SELECT source,last_success,last_error,metadata FROM discovery_sources WHERE user_id=?', (uid,))]
             spend = [dict(r) for r in db.execute("SELECT provider,count(*) AS requests,SUM(reserved_cents) AS reserved_cents,SUM(actual_cents) AS actual_cents,SUM(actual_cents IS NULL) AS unreconciled FROM discovery_spend WHERE user_id=? AND created_at LIKE ? GROUP BY provider", (uid, stamp()[:7] + '%'))]
             total = db.execute('SELECT count(*) FROM discovery_records WHERE user_id=?', (uid,)).fetchone()[0]
             yields=[dict(r) for r in db.execute("""SELECT source,count(*) AS discovered,

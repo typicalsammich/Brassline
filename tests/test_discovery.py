@@ -119,5 +119,17 @@ assert other.post('/api/discovery/settings',json=settings).status_code==200
 with patch('discovery_sources.schema',return_value={}),patch('discovery_sources.fetch_page',return_value=([raw],'row-1',True)):
  assert m.app.state.discovery_tick()
 assert len(other.get('/api/discovery').json()['records'])==1
+# Both new native source types reach the private queue without phone/owner invention.
+native_settings={**DEFAULTS,'enabled':True,'sources':['ca_cslb','fl_dbpr_construction'],'states':['CA','FL'],'raw_daily_limit':100}
+assert c.post('/api/discovery/settings',json=native_settings).status_code==200
+ca_native={'id':'CA-FIXTURE','name':'Native CA Plumbing','business_type':'Sole Owner','phone':'9046945640','city':'Example','state':'CA','category':'Plumbing','expiration':'12/31/2099','issued':'01/01/2025','license_status':'CLEAR'}
+fl_native={'id':'CFC-FIXTURE:abc','license_id':'CFC-FIXTURE','licensee':'EXAMPLE, ALEX','name':'Native FL Plumbing','phone':'','city':'Example','state':'FL','category':'Plumbing','expiration':'12/31/2099','issued':'01/01/2025','license_status':'Current, Active'}
+def native_page(key,*args,**kwargs):return ([ca_native if key=='ca_cslb' else fl_native],'',True)
+with patch('discovery_sources.schema',return_value={}),patch('discovery_sources.fetch_page',side_effect=native_page):
+ for _ in range(6):m.app.state.discovery_tick()
+native={r['source']:r for r in c.get('/api/discovery').json()['records'] if r.get('source') in ('ca_cslb','fl_dbpr_construction')}
+assert set(native)=={'ca_cslb','fl_dbpr_construction'}
+assert native['ca_cslb']['phone_detail']['classification']=='general_business' and not native['ca_cslb']['people']
+assert native['fl_dbpr_construction']['phone_detail']['classification']=='none' and native['fl_dbpr_construction']['people'][0]['status']=='unknown'
 print('PASS: official role normalization, fictional-phone rejection, evidence/status separation, business identity, private records, review requirements, idempotent lead creation, restart recovery, pause fencing, changed-source holds; no paid APIs or calls.')
 print('PASS: monetary caps + shared units, pre-dispatch reservations, durable response cache, no automatic paid re-dispatch, administrator-only billing reconciliation and pause on cost-ceiling breach, official schema-drift stop. All provider calls mocked.')

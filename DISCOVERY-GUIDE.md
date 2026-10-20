@@ -4,7 +4,7 @@
 
 This extends the existing Scraper, Research, Leads, Shared services and Dialer. It does not replace the Google Maps worker, import archive, existing 100-point score, calling rules, CRM, recordings, or coaching. Automatic Discovery is **off by default**, and paid search has separate, initially zero budgets. Discovery never starts a call.
 
-The initial automated government coverage is **New York State, New York City licensing, and Colorado registries**. This is an extensible multi-state pilot, **not complete nationwide government coverage or a demonstrated 100 qualified leads/day service**. The existing local Google Maps workflow still covers the US.
+The initial automated government coverage is **California contractor trades, Florida construction licenses, New York State, New York City licensing, and Colorado registries**. This is an extensible multi-state pilot, **not complete nationwide government coverage or a demonstrated 100 qualified leads/day service**. The existing local Google Maps workflow still covers the US.
 
 Public-data discovery runs on the server without Chrome. A durable SQLite queue saves source cursors, source IDs, checksums, per-record profiles, revisions, job attempts and fenced leases. Free jobs retry up to three times with backoff. Expired leases resume after restart. Pausing prevents further claims and fences in-flight writes. Source changes retain previously reviewed evidence and require revalidation. Independent records sharing only a phone are not merged; existing phone-based contact suppression remains enforced separately.
 
@@ -38,13 +38,13 @@ python discovery_wake.py
 
 Schedule that HTTP-only command every 15 minutes (or at least once daily if your web service stays running). It sends JSON and a Bearer token to `POST /api/discovery/wake`; it never reads SQLite. Configure scheduler failure alerts. The script refuses redirects and does not log tokens. No service was provisioned and no new recurring hosting charge was authorized by this code change.
 
-**Do not put a separate worker/cron service against a second copy of dashboard.db. Render web disks are not a shared database across services.** The external scheduler wakes the existing web process, which owns all job execution. More processes/instances require migration to a shared transactional database/queue first. SQLite writes stay short; provider I/O is outside write transactions. Jobs use 180-second leases, so recovery after an abrupt process loss may wait three minutes.
+**Do not put a separate worker/cron service against a second copy of dashboard.db. Render web disks are not a shared database across services.** The external scheduler wakes the existing web process, which owns all job execution. More processes/instances require migration to a shared transactional database/queue first. SQLite writes stay short; provider I/O is outside write transactions. Research/Socrata jobs use 180-second leases; initial bulk-source refreshes use 900-second leases. Recovery after abrupt process loss can wait three or fifteen minutes respectively.
 
 No new runtime dependencies are required. Existing `ONLINE`, `PUBLIC_BASE_URL`, encrypted integration key, database and Twilio settings are unchanged. Practice mode blocks government discovery and paid enrichment.
 
 ## Verified source catalog — checked October 20, 2026
 
-Actual official metadata and read-only sample requests, including a second keyset page, succeeded for each implemented connector. This verifies the feed/schema/pagination, **not individual ownership or telephone connectivity**.
+Actual official metadata or download schemas and read-only sample requests, including a second keyset page, succeeded for each implemented connector. This verifies the feed/schema/pagination, **not individual ownership or telephone connectivity**.
 
 | Connector | Official endpoint / schema | Cadence and limitations |
 |---|---|---|
@@ -54,11 +54,14 @@ Actual official metadata and read-only sample requests, including a second keyse
 
 These are public government open-data feeds; no authentication or CAPTCHA bypass is implemented. Access remains subject to each publisher's conditions and availability. Pages are bounded at 100 records / 4 MB, 25-second timeouts, fixed allowlisted hosts, no redirects, one-minute page spacing. Cursors use Socrata system IDs; fingerprints use stable publisher record IDs. A changed response schema stops the connector rather than guessing columns. Periodic rescans catch updated rows after a complete keyset cycle; this is not a CDC stream. Source metadata records rows-updated timestamps, with health/errors exposed in the interface. Errors and provider payloads never disclose keys in health messages.
 
-Researched but **not implemented**:
+Additional operational feeds:
 
-- [California CSLB master portal](https://www.cslb.ca.gov/onlineservices/dataportal/ContractorList): free master and personnel CSV/Excel via a selection form. Includes business phones and distinct personnel titles. Automated form/download handling and CSV layout validation remain to be implemented; no guessed direct download URL is used.
-- [Florida Sunbiz downloads](https://dos.fl.gov/sunbiz/other-services/data-downloads/): workday daily and quarterly active-entity bulk files through the official SFTP service. Fixed-width parser, SFTP transport and checkpoint mapping are not implemented.
-- [Florida DBPR open government](https://www2.myfloridalicense.com/open-government/): public board extracts exist. Board-specific layouts and exact download endpoints have not been validated, so there is no falsely active connector.
+- **California CSLB**, [official classification download](https://www.cslb.ca.gov/onlineservices/dataportal/ListByClassification): statewide XLSX exports for ten supported contractor classes, validated named columns, CLEAR/unexpired records, public `PhoneNumber`. Classes rotate while retaining separate checkpoints. Business type is preserved, but **owner names are not inferred from Sole Owner or from the business name**. The full master CSV transfer was unreliable during validation; this connector uses the smaller official class-specific exports instead.
+- **Florida DBPR construction**, [official CSV](https://www2.myfloridalicense.com/sto/file_download/extracts/CONSTRUCTIONLICENSE_1.csv) and [official code definitions](https://www2.myfloridalicense.com/about-us/understanding-dbpr-codes/): validated legacy construction layout, Current (`C`), Active (`A`), unexpired licenses, supported contractor ranks. A licensee/DBA association is not ownership. **This extract contains no telephone column.** Phone and owner verification remain additional research tasks.
+
+Native feeds are streamed or read through bounded XLSX archives into atomically replaced SQLite caches under the persistent database directory, without residential street addresses. Public caches are shared across accounts; private reviews, leads and quotas are not. Cache refresh is at most weekly. A failed/schema-changed/incomplete download does not replace the last good cache or advance the account checkpoint. Expired caches fail closed if refresh fails. Supported CA trades, cache/storage limits, validation results and setup are detailed in [FL-CA-SOURCES.md](FL-CA-SOURCES.md).
+
+Still not implemented: Florida Sunbiz SFTP ingestion, other Florida DBPR boards, California personnel/master ingestion, and additional state feeds. These are not represented as functioning connectors.
 
 ## Costs and expected yield
 
@@ -82,11 +85,11 @@ Use **Shared services → Reconcile provider billing** to enter provider-confirm
 
 New tables: `discovery_settings`, `discovery_sources`, `discovery_records`, `discovery_jobs`, `discovery_spend`, `discovery_search_cache`, `discovery_review_log`, `discovery_billing_audit`. Existing lead/import/call/history tables are preserved. Review and source provenance are account-scoped. Discovery configuration defaults are in `discovery_service.py`; do not edit a production DB to enable spending.
 
-New files: `discovery_sources.py`, `owner_verification.py`, `discovery_service.py`, `discovery_wake.py`, `static/discovery.js`, this guide. Modified: `research_service.py`, `leads_service.py`, `lead_identity.py`, `scraper_service.py`, `website_checks.py`, `static/scraper.js`, `static/research.js`, `static/leads.js`, `static/dialer.js`, `static/shared_services.js`, `dialer_service.py`, `.env.example`, `README.md`.
+New files: `discovery_sources.py`, `discovery_bulk_sources.py`, `owner_verification.py`, `discovery_service.py`, `discovery_wake.py`, `static/discovery.js`, this guide. Modified: `research_service.py`, `leads_service.py`, `lead_identity.py`, `scraper_service.py`, `website_checks.py`, `static/scraper.js`, `static/research.js`, `static/leads.js`, `static/dialer.js`, `static/shared_services.js`, `dialer_service.py`, `.env.example`, `README.md`.
 
 ## Limits and production verification still required
 
-- This is a conservative pilot, not the entire nationwide expansion described in the master request. Remaining state connectors, optional phone intelligence, browser-rendered/advanced technical audits and autonomous independent-operation/activity verification are not implemented. No social/private-person scraping is added.
+- This is a conservative pilot, not the entire nationwide expansion described in the master request. Additional state/registry connectors, optional phone intelligence, browser-rendered/advanced technical audits and autonomous independent-operation/activity verification are not implemented. No social/private-person scraping is added.
 - Material website judgments and unresolved owner identity still require evidence review. A publication verifies a publicly asserted role, not an independent legal ownership audit. “Verified business phone” means verified publication/association; connected/carrier status remains explicitly untested. No paid phone lookup adapter is shipped.
 - Initial free sources are limited geographically; arbitrary state selection does not create missing connectors. Source filters match entity names or licensed categories, so industry matching can miss businesses. No absence claim is made from an unsuccessful query.
 - Account retention is capped at 10,000 discovery records for the pilot. Larger operation needs a retention/storage plan. Original imports, discovery evidence and call history are never silently purged to meet a target. Historic data already merged under older phone-only logic is not reconstructed by this change.
@@ -99,3 +102,5 @@ Automated coverage is documented in the delivery notes: official source adapters
 ### Run the shipped backend checks
 
 After installing the existing requirements, run `python tests/test_discovery.py` from the application directory. It uses a temporary database, fake credentials and mocked paid providers; it does not touch the production database or contact paid providers. The additional browser/workflow regression checks were run in the development workspace.
+
+Native CA/FL parser/cache tests: `python tests/test_discovery_bulk.py`. These use generated fixtures, no network calls or paid services.

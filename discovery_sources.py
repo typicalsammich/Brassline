@@ -18,14 +18,17 @@ class Source:
     cadence: str
     required: tuple
     limitation: str
+    kind: str = 'socrata'
+    endpoint: str = ''
+    documentation: str = ''
 
     @property
     def url(self):
-        return f'https://{self.host}/resource/{self.dataset}.json'
+        return self.endpoint or f'https://{self.host}/resource/{self.dataset}.json'
 
     def public(self):
         return {**self.__dict__, 'url': self.url,
-                'metadata_url': f'https://{self.host}/api/views/{self.dataset}.json'}
+                'metadata_url': self.documentation or f'https://{self.host}/api/views/{self.dataset}.json'}
 
 
 SOURCES = {
@@ -39,17 +42,21 @@ SOURCES = {
         Source('nyc_licenses', 'NYC DCWP · issued licenses', 'data.cityofnewyork.us', 'w7w3-xahh',
                'license_nbr', 'business_name', 'NY', 'Weekly', ('license_nbr', 'business_name', 'license_status'),
                'Contact phone is a published business contact, not an owner-direct number or proof the line is connected.'),
+        Source('ca_cslb','California CSLB · statewide contractor trades','www.cslb.ca.gov','',
+               'id','name','CA','Official bulk snapshot · seven-day cache',('id','name'),
+               'CLEAR, unexpired licenses across ten supported trades. Published business phones. Business type is retained; the export does not identify the owner’s full name.',
+               'bulk','https://www.cslb.ca.gov/onlineservices/dataportal/ListByClassification','https://www.cslb.ca.gov/onlineservices/dataportal/ListByClassification'),
+        Source('fl_dbpr_construction','Florida DBPR · construction licenses','www2.myfloridalicense.com','',
+               'id','name','FL','Official construction CSV · seven-day cache',('id','name'),
+               'Current, Active, unexpired construction licenses. License holder/qualifier is not a verified owner. This extract has no business-phone column.',
+               'bulk','https://www2.myfloridalicense.com/sto/file_download/extracts/CONSTRUCTIONLICENSE_1.csv','https://www2.myfloridalicense.com/about-us/understanding-dbpr-codes/'),
     )
 }
 
 # Researched but intentionally not represented as functioning connectors.
 PENDING = [
-    {'name': 'California CSLB', 'url': 'https://www.cslb.ca.gov/onlineservices/dataportal/ContractorList',
-     'status': 'Manual master/personnel CSV downloads; automated form/download schema not validated.'},
     {'name': 'Florida Sunbiz', 'url': 'https://dos.fl.gov/sunbiz/other-services/data-downloads/',
      'status': 'Daily and quarterly bulk SFTP files; fixed-width ingestion not implemented.'},
-    {'name': 'Florida DBPR', 'url': 'https://www2.myfloridalicense.com/open-government/',
-     'status': 'Public extracts available; per-board layouts/download endpoints not yet validated.'},
 ]
 
 
@@ -76,6 +83,9 @@ def get_json(url):
 
 
 def schema(source):
+    if source.kind=='bulk':
+        from discovery_bulk_sources import schema as bulk_schema
+        return bulk_schema(source.key)
     data = get_json(f'https://{source.host}/api/views/{source.dataset}.json')
     fields = {c.get('fieldName') for c in data.get('columns', [])}
     if not set(source.required) <= fields:
@@ -86,6 +96,9 @@ def schema(source):
 
 def fetch_page(key, cursor='', limit=100, industries=()):
     source = SOURCES[key]
+    if source.kind=='bulk':
+        from discovery_bulk_sources import fetch_page as bulk_page
+        return bulk_page(key,cursor,limit,industries)
     # SoQL system IDs are opaque strings. Keyset paging avoids offset drift on inserts.
     quote = lambda v: str(v).replace("'", "''")
     where = []
@@ -110,6 +123,9 @@ def fetch_page(key, cursor='', limit=100, industries=()):
 
 def normalize(key, row, retrieved):
     s = SOURCES[key]
+    if s.kind=='bulk':
+        from discovery_bulk_sources import normalize as bulk_normalize
+        return bulk_normalize(key,row,retrieved)
     # Deliberately exclude residential agent / officer addresses from normalized leads.
     city = row.get('principalcity', '') if key == 'co_entities' else row.get('address_city', '') if key == 'nyc_licenses' else row.get('location_city', '')
     state = row.get('principalstate', s.state) if key == 'co_entities' else row.get('address_state', s.state) if key == 'nyc_licenses' else row.get('location_state', s.state)
