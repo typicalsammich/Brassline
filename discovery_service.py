@@ -247,6 +247,7 @@ def install(app, connect, user, practice):
             revision = row['revision']
             profile = json.loads(row['profile'])
             cfg = cfg_in(db, uid)
+        profile.pop('search_notice', None)
         # Registry records are cheap discovery seeds, not evidence of independence or demand.
         if cfg['paid_enabled'] and not practice:
             from shared_services import config, reserve_in
@@ -297,9 +298,11 @@ def install(app, connect, user, practice):
                         profile.setdefault('search_notice', 'Previous paid dispatch is not repeated automatically. Review provider usage; no cached response was saved.')
                 else:
                     profile['search_notice'] = 'Paid search skipped: budget, price ceiling or provider not available.'
+        if not cfg['paid_enabled']:
+            profile['search_notice'] = 'Paid search is disabled; only existing public evidence was processed.'
         # Search snippets alone never verify a company or an owner. Test at most two
         # candidate sites with the existing pinned-DNS public HTML checker.
-        if not profile.get('website_url') and profile.get('phone'):
+        if not profile.get('website_url'):
             from urllib.parse import urlsplit
             import website_checks
             tried=set()
@@ -312,6 +315,17 @@ def install(app, connect, user, practice):
                 tried.add(host)
                 try:
                     report=website_checks.check_website(url,business=profile)
+                    # Keep leads from an unmatched site as candidates, never verified facts.
+                    profile.setdefault('contact_candidates', [])
+                    for contact in report.get('contacts', []):
+                        if contact.get('type') == 'business_phone':
+                            candidate_contact = {**contact, 'status':'Unverified business match - review source before using'}
+                            if candidate_contact not in profile['contact_candidates']:
+                                profile['contact_candidates'].append(candidate_contact)
+                    for person in report.get('decision_makers', []):
+                        candidate_person = {**person, 'source_url':person.get('source',url), 'basis':'website_candidate', 'identity_confirmed':False, 'retrieved_at':report.get('checked_at',stamp()), 'evidence':person.get('excerpt') or person.get('verification','')}
+                        if candidate_person not in profile.setdefault('people',[]):
+                            profile['people'].append(candidate_person)
                     if report.get('company_identity_confirmed'):
                         profile.update(website_url=url,website_identity_confirmed=True,website_check=report)
                         break
@@ -479,6 +493,30 @@ def install(app, connect, user, practice):
             raise HTTPException(403,'Administrator access required')
         with connect() as db:
             return {'requests':[dict(r) for r in db.execute('SELECT request_key,user_id,provider,reserved_cents,actual_cents,state,created_at FROM discovery_spend ORDER BY created_at DESC LIMIT 100')]}
+
+    @app.post('/api/discovery/research-existing')
+    def research_existing(request: Request):
+        uid = user(request)['id']
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            cfg = cfg_in(db, uid)
+            if practice or not cfg['enabled']:
+                raise HTTPException(409, 'Start discovery before researching existing businesses')
+            if not cfg['paid_enabled'] or not all(cfg[k] > 0 for k in ('monthly_budget_cents','daily_budget_cents','search_ceiling_cents')):
+                raise HTTPException(409, 'Save paid-search authorization and nonzero spending ceilings in Discovery settings first. Existing shared research allowances also apply.')
+            queued = 0
+            for row in db.execute('SELECT id,fingerprint,profile FROM discovery_records WHERE user_id=? ORDER BY id LIMIT 10000', (uid,)).fetchall():
+                profile = json.loads(row['profile'])
+                if owners.summarize(profile,cfg['minimum_confidence'],cfg['require_phone'])['qualified']:
+                    continue
+                if db.execute("SELECT 1 FROM discovery_jobs WHERE user_id=? AND kind='research' AND json_extract(payload,'$.record_id')=? AND state IN ('queued','retry','running')", (uid,row['id'])).fetchone():
+                    continue
+                key = f"{uid}:enrich:{row['id']}:{row['fingerprint']}"
+                enqueue(db, uid, 'research', key, {'record_id':row['id']})
+                db.execute("UPDATE discovery_jobs SET state='queued',available_at=0,attempts=0,message='',updated_at=? WHERE user_id=? AND job_key=? AND state IN ('complete','failed')", (time.time(),uid,key))
+                queued += 1
+        wake.set()
+        return {'ok':True,'message':f'{queued} existing businesses queued for contact research. Saved search responses are reused; previously dispatched paid requests are not purchased again. Spending limits and shared allowances still apply.'}
 
     @app.post('/api/discovery/start')
     def start(request: Request):
