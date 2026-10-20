@@ -55,6 +55,9 @@ class Begin(BaseModel):
 class CallingList(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     lead_ids:list[int]=Field(default_factory=list,max_length=5000)
+class ListDay(BaseModel):
+    list_ids:list[int]=Field(min_length=1,max_length=500)
+    day:str=Field(pattern=r'^\d{4}-\d{2}-\d{2}$')
 class ListOrganization(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     folder:str=Field(default='',max_length=60)
@@ -77,8 +80,9 @@ def install(app,connect,user,practice):
         CREATE TABLE IF NOT EXISTS number_rotation(user_id INTEGER REFERENCES users(id),number TEXT,uses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,number));
         ''')
         list_columns={r[1] for r in db.execute('PRAGMA table_info(calling_lists)')}
-        for key,definition in [('folder',"TEXT NOT NULL DEFAULT ''"),('favorite','INTEGER NOT NULL DEFAULT 0'),('archived','INTEGER NOT NULL DEFAULT 0')]:
+        for key,definition in [('folder',"TEXT NOT NULL DEFAULT ''"),('favorite','INTEGER NOT NULL DEFAULT 0'),('archived','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT NOT NULL DEFAULT ''")]:
             if key not in list_columns:db.execute('ALTER TABLE calling_lists ADD COLUMN '+key+' '+definition)
+        db.execute("CREATE TRIGGER IF NOT EXISTS calling_list_created AFTER INSERT ON calling_lists WHEN NEW.created_at='' BEGIN UPDATE calling_lists SET created_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=NEW.id; END")
         columns={r[1] for r in db.execute('PRAGMA table_info(call_events)')}
         if 'attempt_id' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN attempt_id TEXT')
         if 'recorded_at' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN recorded_at TEXT')
@@ -133,7 +137,27 @@ def install(app,connect,user,practice):
             events=[event for event in dispositions if event['source']=='dialer']
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
         with connect() as db:
-            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,l.folder,l.favorite,l.archived,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.favorite DESC,l.folder COLLATE NOCASE,l.name COLLATE NOCASE,l.id',(uid,))]
+            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,l.folder,l.favorite,l.archived,l.created_at,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.favorite DESC,l.folder COLLATE NOCASE,l.name COLLATE NOCASE,l.id',(uid,))]
+            # Count attempted contacts across this account, including duplicate lead rows.
+            from lead_identity import contact_groups
+            identity=contact_groups(db.execute('SELECT id,name,phone,place_id,city FROM leads WHERE user_id=?',(uid,)).fetchall())
+            attempted={identity.get(r[0],r[0]) for r in db.execute('SELECT lead_id FROM dial_attempts WHERE user_id=? UNION SELECT lead_id FROM call_events WHERE user_id=? AND ignored=0',(uid,uid))}
+            memberships={}
+            for r in db.execute('SELECT m.list_id,l.id FROM calling_list_members m JOIN leads l ON l.id=m.lead_id JOIN calling_lists c ON c.id=m.list_id WHERE c.user_id=? AND l.user_id=? AND l.deleted_at IS NULL',(uid,uid)):
+                memberships.setdefault(r[0],set()).add(identity.get(r[1],r[1]))
+            folder_stats=[]
+            for item in lists:
+                contacts=memberships.get(item['id'],set())
+                item['uncalled']=len(contacts-attempted)
+                item['contact_count']=len(contacts)
+            for state in ('active','archived','all'):
+                grouped={}
+                for item in lists:
+                    if state!='all' and bool(item['archived'])!=(state=='archived'):continue
+                    entry=grouped.setdefault(item['folder'],{'contacts':set(),'lists':0})
+                    entry['contacts'].update(memberships.get(item['id'],set()));entry['lists']+=1
+                for folder,entry in grouped.items():
+                    folder_stats.append({'folder':folder,'state':state,'lists':entry['lists'],'count':len(entry['contacts']),'uncalled':len(entry['contacts']-attempted)})
             if list_id and not any(l['id']==list_id and not l['archived'] for l in lists):raise HTTPException(404,'Calling list unavailable; restore archived lists in Manage calling lists')
             members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
@@ -163,7 +187,7 @@ def install(app,connect,user,practice):
             active['script_snapshot']=json.loads(pending['script_snapshot'])
             active['coach_profile_name']=json.loads(pending['coach_profile_snapshot'] or '{}').get('name','Default coach')
             active['funding']='Administrator-funded' if pending['sponsored'] else 'Your Twilio account'
-        return {'lists':lists,'list_id':list_id,'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
+        return {'lists':lists,'folders':folder_stats,'list_id':list_id,'mode':mode,'funding':'Administrator-funded' if config.get('sponsored') else 'Your Twilio account','preferences':preferences,'results':rules['results'],'queue':queue,'active_attempt':active,'summary':{'dials':len(today_events),'answered':answered,'booked':booked,'answer_rate':round(answered/len(today_events)*100,1) if today_events else None,'booking_rate':round(booked/answered*100,1) if answered else None},'today':str(today)}
 
     def owned_attempt(db,uid,attempt_id):
         row=db.execute('SELECT * FROM dial_attempts WHERE id=? AND user_id=?',(attempt_id,uid)).fetchone()
@@ -254,6 +278,20 @@ def install(app,connect,user,practice):
             mapping=groups(rows);duplicates=[i for i,root in mapping.items() if i!=root]
             db.executemany('DELETE FROM calling_list_members WHERE list_id=? AND lead_id=?',[(list_id,i) for i in duplicates])
         return {'removed':len(duplicates),'remaining':len(rows)-len(duplicates),'note':'Only duplicate list entries removed. Business records, import rows and call history retained.'}
+
+    @app.post('/api/dialer/lists/group-day')
+    def group_lists_by_day(data:ListDay,request:Request):
+        uid=user(request)['id']
+        try:datetime.strptime(data.day,'%Y-%m-%d')
+        except ValueError:raise HTTPException(400,'Choose a valid date')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            ids=set(data.list_ids)
+            owned={r[0] for r in db.execute('SELECT id FROM calling_lists WHERE user_id=?',(uid,))}
+            if not ids<=owned:raise HTTPException(404,'Calling list not found')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call before organizing lists')
+            db.executemany('UPDATE calling_lists SET folder=? WHERE id=? AND user_id=?',[(data.day,lid,uid) for lid in ids])
+        return {'ok':True,'updated':len(ids)}
 
     @app.post('/api/dialer/lists/{list_id}/organization')
     def organize_list(list_id:int,data:ListOrganization,request:Request):
