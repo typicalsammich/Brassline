@@ -55,6 +55,11 @@ class Begin(BaseModel):
 class CallingList(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     lead_ids:list[int]=Field(default_factory=list,max_length=5000)
+class ListOrganization(BaseModel):
+    name:str=Field(min_length=1,max_length=100)
+    folder:str=Field(default='',max_length=60)
+    favorite:bool=False
+    archived:bool=False
 class ManualNumber(BaseModel):
     phone:str=Field(max_length=80)
     name:str=Field(default='',max_length=300)
@@ -71,6 +76,9 @@ def install(app,connect,user,practice):
         CREATE TABLE IF NOT EXISTS calling_list_members(list_id INTEGER REFERENCES calling_lists(id) ON DELETE CASCADE,lead_id INTEGER REFERENCES leads(id),PRIMARY KEY(list_id,lead_id));
         CREATE TABLE IF NOT EXISTS number_rotation(user_id INTEGER REFERENCES users(id),number TEXT,uses INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,number));
         ''')
+        list_columns={r[1] for r in db.execute('PRAGMA table_info(calling_lists)')}
+        for key,definition in [('folder',"TEXT NOT NULL DEFAULT ''"),('favorite','INTEGER NOT NULL DEFAULT 0'),('archived','INTEGER NOT NULL DEFAULT 0')]:
+            if key not in list_columns:db.execute('ALTER TABLE calling_lists ADD COLUMN '+key+' '+definition)
         columns={r[1] for r in db.execute('PRAGMA table_info(call_events)')}
         if 'attempt_id' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN attempt_id TEXT')
         if 'recorded_at' not in columns:db.execute('ALTER TABLE call_events ADD COLUMN recorded_at TEXT')
@@ -125,8 +133,8 @@ def install(app,connect,user,practice):
             events=[event for event in dispositions if event['source']=='dialer']
             pending=db.execute('SELECT * FROM dial_attempts WHERE user_id=? AND result_recorded=0 ORDER BY started_at LIMIT 1',(uid,)).fetchone()
         with connect() as db:
-            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.id',(uid,))]
-            if list_id and not any(l['id']==list_id for l in lists):raise HTTPException(404,'Calling list not found')
+            lists=[dict(r) for r in db.execute('SELECT l.id,l.name,l.folder,l.favorite,l.archived,COUNT(b.id) AS count FROM calling_lists l LEFT JOIN calling_list_members m ON m.list_id=l.id LEFT JOIN leads b ON b.id=m.lead_id AND b.user_id=l.user_id AND b.deleted_at IS NULL WHERE l.user_id=? GROUP BY l.id ORDER BY l.favorite DESC,l.folder COLLATE NOCASE,l.name COLLATE NOCASE,l.id',(uid,))]
+            if list_id and not any(l['id']==list_id and not l['archived'] for l in lists):raise HTTPException(404,'Calling list unavailable; restore archived lists in Manage calling lists')
             members={r[0] for r in db.execute('SELECT lead_id FROM calling_list_members WHERE list_id=?',(list_id,))} if list_id else set()
         today_events=[e for e in events if as_date(e['created_at'],tz)==today]
         outcomes={item['label']:item for item in rules['results']};outcomes['Call Later']=outcomes.get('Callback',{});answered=sum(bool(outcomes.get(e['result'],{}).get('answered')) for e in today_events);booked=sum(bool(outcomes.get(e['result'],{}).get('booked')) for e in today_events)
@@ -230,6 +238,7 @@ def install(app,connect,user,practice):
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT id FROM calling_lists WHERE user_id=? AND name=?',(uid,name)).fetchone()
             lid=row['id'] if row else db.execute('INSERT INTO calling_lists(user_id,name) VALUES(?,?)',(uid,name)).lastrowid
+            db.execute('UPDATE calling_lists SET archived=0 WHERE id=? AND user_id=?',(lid,uid))
             db.executemany('INSERT OR IGNORE INTO calling_list_members VALUES(?,?)',[(lid,i) for i in set(data.lead_ids)])
         return {'id':lid,'name':name}
 
@@ -245,6 +254,18 @@ def install(app,connect,user,practice):
             mapping=groups(rows);duplicates=[i for i,root in mapping.items() if i!=root]
             db.executemany('DELETE FROM calling_list_members WHERE list_id=? AND lead_id=?',[(list_id,i) for i in duplicates])
         return {'removed':len(duplicates),'remaining':len(rows)-len(duplicates),'note':'Only duplicate list entries removed. Business records, import rows and call history retained.'}
+
+    @app.post('/api/dialer/lists/{list_id}/organization')
+    def organize_list(list_id:int,data:ListOrganization,request:Request):
+        uid=user(request)['id'];name=data.name.strip();folder=data.folder.strip()
+        if not name:raise HTTPException(400,'Name your calling list')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM calling_lists WHERE id=? AND user_id=?',(list_id,uid)).fetchone():raise HTTPException(404,'Calling list not found')
+            if db.execute('SELECT 1 FROM dial_attempts WHERE user_id=? AND result_recorded=0',(uid,)).fetchone():raise HTTPException(409,'Finish the current call before organizing lists')
+            if db.execute('SELECT 1 FROM calling_lists WHERE user_id=? AND id!=? AND lower(name)=lower(?)',(uid,list_id,name)).fetchone():raise HTTPException(409,'Another calling list already uses that name')
+            db.execute('UPDATE calling_lists SET name=?,folder=?,favorite=?,archived=? WHERE id=? AND user_id=?',(name,folder,int(data.favorite),int(data.archived),list_id,uid))
+        return {'ok':True}
 
     @app.post('/api/dialer/lists/{list_id}/delete')
     def delete_list(list_id:int,request:Request):
